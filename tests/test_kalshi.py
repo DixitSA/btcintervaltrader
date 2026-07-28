@@ -267,11 +267,29 @@ def test_authed_request_without_credentials_is_a_clear_error():
 
 
 def test_kalshi_fee_matches_published_formula():
-    """fee = ceil(0.07 * C * P * (1-P) * 100) / 100"""
+    """fee = ceil(0.07 * C * P * (1-P) * 100) / 100
+
+    `round` before `ceil` so this asserts the formula rather than reproducing
+    binary float error: the naive expression makes 0.07*100*0.5*0.5*100 come
+    out as 175.00000000000003, so a test written that way "passes" against an
+    implementation that overcharges a cent at the peak.
+    """
     fees = KalshiFees()
     for shares, price in ((100, 0.50), (37, 0.23), (1000, 0.91)):
-        expected = math.ceil(0.07 * shares * price * (1 - price) * 100) / 100
+        expected = math.ceil(round(0.07 * shares * price * (1 - price) * 100, 9)) / 100
         assert fees.entry_fee(shares, price) == pytest.approx(expected)
+
+
+def test_kalshi_fee_matches_published_range_for_100_contracts():
+    """Kalshi's fee schedule states $0.07 - $1.75 taker on 100 contracts.
+
+    Pinned to the published numbers, not to our own arithmetic, so a rounding
+    regression at the peak fails here instead of silently costing a cent a fill.
+    """
+    fees = KalshiFees()
+    assert fees.entry_fee(100, 0.50) == pytest.approx(1.75)
+    assert fees.entry_fee(100, 0.01) == pytest.approx(0.07)
+    assert fees.entry_fee(100, 0.99) == pytest.approx(0.07)
 
 
 def test_kalshi_fee_peaks_at_fifty_cents():

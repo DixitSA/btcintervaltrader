@@ -80,8 +80,13 @@ class KalshiFees:
         if shares <= 0 or coefficient <= 0:
             return 0.0
         price = min(max(price, 0.0), 1.0)
-        raw = coefficient * shares * price * (1.0 - price)
-        return math.ceil(raw * 100.0) / 100.0
+        raw_cents = coefficient * shares * price * (1.0 - price) * 100.0
+        # Kill float representation error BEFORE the ceil. At the exact peak,
+        # 0.07 * 100 * 0.5 * 0.5 * 100 evaluates to 175.00000000000003, which
+        # ceils to 176 -- charging $1.76 where Kalshi's published schedule caps
+        # taker fees on 100 contracts at $1.75. The 9dp round is far tighter
+        # than a cent, so genuine round-ups (0.0175 -> 2c) are untouched.
+        return math.ceil(round(raw_cents, 9)) / 100.0
 
     def entry_fee(self, shares: float, price: float) -> float:
         return self._fee(self.taker_coefficient, shares, price)
