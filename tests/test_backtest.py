@@ -1,0 +1,163 @@
+"""End-to-end backtest tests, including the control experiment.
+
+The key test here is `test_volume_rule_shows_no_edge_in_a_no_edge_world`: on
+synthetic data where volume is generated independently of the price path, the
+volume rule must NOT show a significant edge. If it ever does, the harness has
+a bug and every result it produces is worthless.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from btcbot.backtest import BacktestReport, WindowResult, infer_outcome, run_backtest
+from btcbot.config import Config
+from btcbot.models import DOWN, UP
+from btcbot.recorder import load_dataset, snapshot_from_dict, snapshot_to_dict
+from btcbot.simulate import generate
+from btcbot.strategies import build_strategy
+
+from .test_core import make_snapshot
+
+
+@pytest.fixture(scope="module")
+def sim_dir(tmp_path_factory):
+    out = tmp_path_factory.mktemp("sim")
+    generate(out, n_windows=300, seed=7)
+    return out
+
+
+@pytest.fixture(scope="module")
+def sim_snapshots(sim_dir):
+    return load_dataset(sim_dir)
+
+
+def test_simulator_produces_a_dataset(sim_snapshots):
+    assert len(sim_snapshots) > 1000
+    slugs = {s.market.slug for s in sim_snapshots}
+    assert len(slugs) == 300
+
+
+def test_snapshot_roundtrips_through_serialisation():
+    snap = make_snapshot(p_up=0.42, volume=123.0)
+    restored = snapshot_from_dict(snapshot_to_dict(snap))
+    assert restored.ts == snap.ts
+    assert restored.market.slug == snap.market.slug
+    assert restored.market.strike == snap.market.strike
+    assert restored.window_volume == snap.window_volume
+    assert restored.up_book.best_ask == snap.up_book.best_ask
+    assert restored.down_book.best_bid == snap.down_book.best_bid
+
+
+def test_infer_outcome_prefers_spot_versus_strike():
+    up = make_snapshot(spot=100_500.0, strike=100_000.0)
+    down = make_snapshot(spot=99_500.0, strike=100_000.0)
+    assert infer_outcome([up]) == UP
+    assert infer_outcome([down]) == DOWN
+
+
+def test_infer_outcome_falls_back_to_terminal_price():
+    snap = make_snapshot(p_up=0.98, strike=None, spot=None)
+    assert infer_outcome([snap]) == UP
+
+
+def test_infer_outcome_none_when_undecidable():
+    snap = make_snapshot(p_up=0.5, strike=None, spot=None)
+    assert infer_outcome([snap]) is None
+
+
+def test_default_volume_rule_takes_no_trades(sim_snapshots):
+    """With assumed_edge=0 the risk layer should refuse every trade,
+    because a signal that equals the market price has no edge to size."""
+    cfg = Config()
+    strat = build_strategy(
+        "volume_threshold", {"min_volume_usd": 500_000, "assumed_edge": 0.0}
+    )
+    report = run_backtest(sim_snapshots, strat, cfg)
+    assert report.windows_with_signal > 0
+    assert report.n == 0
+
+
+@pytest.mark.parametrize("direction", ["follow", "fade", "up", "down"])
+def test_volume_rule_shows_no_edge_in_a_no_edge_world(sim_snapshots, direction):
+    """The control experiment.
+
+    Volume in the simulator is drawn independently of the price path, so no
+    setting of the volume rule can have a real edge. We assert the measured
+    edge is not significant. A failure here means the backtester is leaking
+    future information.
+    """
+    cfg = Config()
+    cfg.risk.max_trades_per_hour = 10_000
+    cfg.risk.daily_loss_limit_usd = 1e9
+    cfg.risk.bankroll_usd = 100_000.0
+
+    strat = build_strategy(
+        "volume_threshold",
+        {"min_volume_usd": 300_000, "direction": direction, "assumed_edge": 0.05},
+    )
+    report = run_backtest(sim_snapshots, strat, cfg)
+
+    if report.n < 30:
+        pytest.skip(f"only {report.n} trades for direction={direction}")
+
+    z = report.z_score
+    assert z is not None
+    assert abs(z) < 3.5, (
+        f"direction={direction} showed z={z:+.2f} in a world with no edge by "
+        "construction -- the harness is leaking information"
+    )
+
+
+def test_report_metrics_are_consistent():
+    report = BacktestReport(starting_bankroll=100.0)
+    report.trades = [
+        WindowResult("a", UP, shares=10, entry_price=0.50, outcome=UP, pnl=5.0),
+        WindowResult("b", UP, shares=10, entry_price=0.50, outcome=DOWN, pnl=-5.0),
+        WindowResult("c", UP, shares=10, entry_price=0.50, outcome=UP, pnl=5.0),
+    ]
+    report.ending_bankroll = 105.0
+
+    assert report.n == 3
+    assert report.wins == 2
+    assert report.win_rate == pytest.approx(2 / 3)
+    assert report.total_staked == pytest.approx(15.0)
+    assert report.total_pnl == pytest.approx(5.0)
+    assert report.roi == pytest.approx(1 / 3)
+    assert report.breakeven_win_rate == pytest.approx(0.50)
+    assert report.max_drawdown == pytest.approx(5.0)
+
+
+def test_report_renders_without_trades():
+    report = BacktestReport(starting_bankroll=100.0)
+    report.rejections["no edge after fees"] = 12
+    text = report.render()
+    assert "No trades were taken" in text
+    assert "no edge after fees" in text
+
+
+def test_report_flags_insignificant_results():
+    report = BacktestReport(starting_bankroll=100.0)
+    # 11 wins out of 20 at $0.50 -- a coin flip.
+    report.trades = [
+        WindowResult(f"w{i}", UP, 10, 0.50, UP if i < 11 else DOWN, 5.0 if i < 11 else -5.0)
+        for i in range(20)
+    ]
+    text = report.render()
+    assert "NOT statistically distinguishable" in text
+
+
+def test_paper_fill_accepted_at_exactly_the_limit():
+    """Regression: float noise must not reject a fill sitting exactly at the
+    rounded limit price."""
+    from btcbot.execution import PaperExecutor
+    from btcbot.models import Order
+
+    cfg = Config()
+    snap = make_snapshot(p_up=0.30, volume=600_000)
+    ask = snap.up_book.best_ask
+    limit = round(ask + cfg.fees.slippage, 3)
+
+    fill = PaperExecutor(cfg).buy(snap, Order(side=UP, shares=10.0, limit_price=limit))
+    assert fill is not None
+    assert fill.price == pytest.approx(limit, abs=1e-6)
