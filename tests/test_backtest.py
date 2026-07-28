@@ -144,6 +144,46 @@ def test_no_positive_edge_with_stops_either(sim_snapshots, direction):
     )
 
 
+def test_breakeven_includes_the_entry_fee():
+    """Break-even is entry price PLUS the taker fee, not the price alone.
+
+    Omitting the fee understates the bar you have to clear and so flatters the
+    z-score computed against it -- an optimistic bias, in the direction that
+    costs money.
+    """
+    from btcbot.fees import KalshiFees
+
+    report = BacktestReport(starting_bankroll=100.0)
+    report.trades = [
+        WindowResult(slug="w", side=UP, shares=10, entry_price=0.50, outcome=UP, pnl=1.0)
+    ]
+
+    # No fee model attached: falls back to the fee-free break-even.
+    assert report.breakeven_win_rate == pytest.approx(0.50)
+
+    report.fee_model = KalshiFees()
+    # 0.07 * 1 * 0.5 * 0.5 = 0.0175 -> rounded up to the cent = 0.02
+    assert report.avg_entry_fee_per_contract == pytest.approx(0.02)
+    assert report.breakeven_win_rate == pytest.approx(0.52)
+
+
+def test_breakeven_with_fees_makes_the_z_score_stricter(sim_snapshots):
+    """The fee-inclusive bar must never be easier than the fee-free one."""
+    strat = build_strategy(
+        "volume_threshold",
+        {"min_volume_usd": 300_000, "direction": "follow", "assumed_edge": 0.05},
+    )
+    report = run_backtest(
+        sim_snapshots, strategy=strat, cfg=research_config(), use_exits=False
+    )
+    if report.n < 30:
+        pytest.skip(f"only {report.n} trades")
+
+    assert report.fee_model is not None, "run_backtest must attach the fee model"
+    assert report.avg_entry_fee_per_contract > 0.0
+    assert report.breakeven_win_rate > report.avg_entry_price
+
+
 def test_sweep_keeps_payoffs_binary_so_its_z_column_is_valid(sim_dir, monkeypatch):
     """`sweep` must run with stops OFF.
 

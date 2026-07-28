@@ -63,6 +63,9 @@ class BacktestReport:
     starting_bankroll: float = 0.0
     ending_bankroll: float = 0.0
     portfolio: Optional[Portfolio] = None
+    # Set by run_backtest so break-even can include the entry fee. Left None on
+    # hand-built reports, which then fall back to the fee-free break-even.
+    fee_model: Optional[object] = None
 
     @property
     def n(self) -> int:
@@ -123,9 +126,36 @@ class BacktestReport:
         return sum(t.entry_price for t in self.trades) / self.n
 
     @property
+    def avg_entry_fee_per_contract(self) -> float:
+        """Taker fee paid per contract at the average entry price.
+
+        Zero when no fee model is attached, which keeps hand-built reports on
+        the old fee-free break-even.
+        """
+        fees = self.fee_model
+        price = self.avg_entry_price
+        if fees is None or price is None:
+            return 0.0
+        try:
+            return float(fees.entry_fee(1.0, price))
+        except Exception:  # noqa: BLE001 - a report must always render
+            return 0.0
+
+    @property
     def breakeven_win_rate(self) -> Optional[float]:
-        """At average entry price c, you must win c of the time to break even."""
-        return self.avg_entry_price
+        """The win rate that actually leaves you flat, fees included.
+
+        Buying at price c costs c plus the taker fee f per contract and pays 1
+        on a win, so you must win (c + f) of the time -- not c. On Kalshi at
+        50c that fee is 1.75c, so omitting it understates the bar by 1.75
+        points and flatters every z-score computed against it. That bias grows
+        in importance exactly as the sample gets big enough to act on: it is
+        worth ~0.35 standard errors at n=100 and ~1.1 at n=1000.
+        """
+        price = self.avg_entry_price
+        if price is None:
+            return None
+        return price + self.avg_entry_fee_per_contract
 
     @property
     def win_rate_stderr(self) -> Optional[float]:
@@ -289,6 +319,7 @@ def run_backtest(
 
     report = BacktestReport(starting_bankroll=portfolio.starting_cash)
     report.portfolio = portfolio
+    report.fee_model = fee_model
     report.windows_seen = len(windows)
 
     outcomes = {slug: infer_outcome(w) for slug, w in windows.items()}
