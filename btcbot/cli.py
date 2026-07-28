@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+import time
 from pathlib import Path
 
 from .backtest import run_backtest
@@ -277,6 +278,9 @@ def cmd_verify_venue(args: argparse.Namespace) -> int:
                 venue.close()
                 return 1
 
+    if args.dump:
+        _dump_raw(cfg, venue, markets[:3], args.dump)
+
     if any(m.strike is None for m in markets[:5]):
         print(
             "\nWARNING: some strikes could not be parsed. Model-based strategies "
@@ -287,6 +291,50 @@ def cmd_verify_venue(args: argparse.Namespace) -> int:
     venue.close()
     print("\nok. Next: `python -m btcbot record` to start collecting data.")
     return 0
+
+
+def _dump_raw(cfg, venue, markets, path: str) -> None:
+    """Save raw API responses so the parsers can be checked against real data.
+
+    This exists because the machine this code was written on cannot reach the
+    venue. Run it where you can, commit the file, and the parsers get validated
+    against genuine payloads instead of assumptions.
+
+    Contains only public market data -- no account info, no credentials. Read it
+    before sharing anyway.
+    """
+    import json as _json
+
+    payload = {
+        "venue": cfg.venue,
+        "captured_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "series": cfg.markets.slug_prefixes,
+        "markets_raw": [],
+        "orderbooks_raw": {},
+    }
+
+    try:
+        if cfg.venue == "kalshi":
+            for series in cfg.markets.slug_prefixes:
+                raw = venue._request(
+                    "GET",
+                    "/markets",
+                    params={"series_ticker": series, "status": "open", "limit": 5},
+                )
+                payload["markets_raw"].append({"series": series, "response": raw})
+            for market in markets:
+                payload["orderbooks_raw"][market.slug] = venue._request(
+                    "GET", f"/markets/{market.slug}/orderbook"
+                )
+        else:
+            payload["note"] = "raw dump is implemented for kalshi only"
+    except Exception as exc:  # noqa: BLE001
+        payload["error"] = str(exc)
+
+    Path(path).write_text(_json.dumps(payload, indent=2))
+    print(f"\nwrote raw API responses to {path}")
+    print("This is public market data only. Commit it and the parsers can be")
+    print("validated against real payloads (see tests/test_fixtures.py).")
 
 
 def cmd_verify_bullpen(args: argparse.Namespace) -> int:
@@ -442,6 +490,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_vv = sub.add_parser(
         "verify-venue", help="check venue connectivity and discovery (places no orders)"
+    )
+    p_vv.add_argument(
+        "--dump",
+        metavar="PATH",
+        default=None,
+        help="save raw API responses to PATH so parsers can be validated offline",
     )
     p_vv.set_defaults(func=cmd_verify_venue)
 

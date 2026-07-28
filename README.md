@@ -418,6 +418,21 @@ Be aware of these before running unattended:
   shapes follow published documentation and are tested against fakes; the wire
   format is not confirmed. Place one minimum-size order by hand and confirm it
   in the web UI first.
+
+  You can close most of this gap in one command, from a machine that can reach
+  the venue:
+
+  ```bash
+  python -m btcbot verify-venue --dump fixtures/kalshi.json
+  ```
+
+  That saves the raw API responses (public market data only — no account info,
+  no credentials). Commit the file and `tests/test_fixtures.py` starts
+  validating every parser against genuine payloads: market parsing, window
+  durations, strike extraction, and the bid-only invariant
+  `up_bid + down_ask == 1.00` on real books. Those tests **skip** until the
+  fixture exists — a skip there means the wire format is still unconfirmed, not
+  that it passed.
 - **The Kalshi settlement source is unconfirmed.** Which BTC index KXBTC15M
   resolves against, and at exactly what instant, was not verifiable from here.
   Confirm it before trusting any model-based signal — see the spot.py warning.
@@ -463,7 +478,7 @@ book-depth check, an hourly trade cap, and a daily loss limit.
 ## Tests
 
 ```bash
-python -m pytest tests/ -q     # 127 passing
+python -m pytest tests/ -q     # 127 passing (+6 fixture tests, skipped until captured)
 ```
 
 ---
