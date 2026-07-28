@@ -179,15 +179,79 @@ python -m btcbot paper
 
 ### Step 4 — Live (only if steps 2 and 3 justified it)
 
+Live requires **both** `mode: live` and `BTCBOT_I_UNDERSTAND_REAL_MONEY=yes`, so
+no config typo can move real money. Use a dedicated wallet funded with only what
+you can afford to lose.
+
+There are two execution backends. Pick one with `execution.backend`.
+
+#### Option A — Bullpen CLI (`backend: bullpen`)
+
+Shells out to the [Bullpen CLI](https://cli.bullpen.fi/), which handles auth,
+signing and funding itself. Nothing wallet-related is needed in this repo.
+
+**The flag syntax in `config.yaml` is a starting point, not confirmed syntax** —
+the Bullpen docs were unreachable from the environment this was built in, so the
+invocation is explicit configuration rather than a hardcoded guess. Verify it:
+
 ```bash
-cp .env.example .env       # add POLYMARKET_PRIVATE_KEY
+python -m btcbot verify-bullpen
+```
+
+That checks the binary exists, runs `bullpen polymarket buy --help`, prints the
+exact command the bot would run, and fails if any flag in your template is
+absent from the help output:
+
+```
+ok   binary: /usr/local/bin/bullpen
+ok   `bullpen polymarket buy --help` succeeded
+
+The bot would invoke:
+  bullpen polymarket buy --token <TOKEN_ID> --shares 10.00 --limit-price 0.520 --yes --json
+
+WARNING: these flags from buy_template do not appear in the help output: --size
+```
+
+Fix `execution.bullpen.buy_template` until it passes, then flip
+`execution.bullpen.dry_run: false`. While `dry_run` is true the command is
+logged and never executed.
+
+#### Option B — direct CLOB signing (`backend: clob`)
+
+```bash
+pip install py-clob-client
+cp .env.example .env       # fill in the POLYMARKET_* values
+```
+
+⚠️ **The single most common failure:** if you funded your account through the
+Polymarket website, your USDC is in a **proxy wallet**, not the EOA that owns
+your private key. You must set `POLYMARKET_SIGNATURE_TYPE=1` (email/Magic login)
+or `2` (browser wallet) **and** `POLYMARKET_FUNDER_ADDRESS` to that proxy
+address. Leave it at `0` only if the private key itself holds the USDC.
+Otherwise orders are signed from an address with no balance. The client raises a
+clear error rather than letting you find out at order time.
+
+```bash
 export BTCBOT_I_UNDERSTAND_REAL_MONEY=yes
 python -m btcbot live
 ```
 
-Live requires **both** `mode: live` and that environment variable, so no config
-typo can move real money. Use a dedicated wallet funded with only what you can
-afford to lose.
+### Known gaps in the live path
+
+Be aware of these before running unattended:
+
+- **Neither live backend has been executed against the real venue.** The network
+  policy where this was built blocks Polymarket and Bullpen entirely. The logic
+  is tested against fakes; the wire format is not confirmed. Place one
+  minimum-size order by hand and confirm it in the Polymarket UI first.
+- **No settlement reconciliation.** `runner.py` releases the position slot ~60s
+  after expiry and books $0 P&L, because it never asks the venue what actually
+  happened. Live bankroll tracking and the daily loss limit are therefore *not*
+  accurate — the kill switch will not fire on real losses yet. Backtest P&L is
+  exact; live P&L is not.
+- **No startup balance or allowance check.** Nothing verifies you hold USDC or
+  that exchange allowances are set.
+- **Fee constants are placeholders** and need verifying against real fills.
 
 ---
 
@@ -202,7 +266,7 @@ afford to lose.
 | `btcbot/signals.py` | Fair-value model, book imbalance, implied probability |
 | `btcbot/strategies/` | `volume_threshold` (the video's rule), `edge_threshold` |
 | `btcbot/risk.py` | Sizing, fee-aware edge check, caps, kill switch |
-| `btcbot/execution.py` | `PaperExecutor` / `LiveExecutor` |
+| `btcbot/execution.py` | `PaperExecutor` / `BullpenExecutor` / `LiveExecutor` |
 | `btcbot/backtest.py` | Replay + statistics |
 | `btcbot/simulate.py` | Synthetic no-edge control world |
 | `btcbot/runner.py` | Live loop |

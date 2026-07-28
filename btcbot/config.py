@@ -55,6 +55,51 @@ class MarketsConfig:
 
 
 @dataclass
+class BullpenConfig:
+    """How to invoke the external Bullpen CLI.
+
+    The template is deliberately explicit rather than built from guessed flags:
+    the published syntax could not be verified from the build environment, and
+    a wrong flag on an order path fails silently or sizes wrongly. Verify with
+    `btcbot verify-bullpen` before trading.
+    """
+
+    binary: str = "bullpen"
+    buy_template: list[str] = field(
+        default_factory=lambda: [
+            "bullpen",
+            "polymarket",
+            "buy",
+            "--token",
+            "{token_id}",
+            "--shares",
+            "{shares}",
+            "--limit-price",
+            "{price}",
+            "--yes",
+            "--json",
+        ]
+    )
+    # Command used by `verify-bullpen` to confirm the binary and subcommand
+    # exist without placing an order.
+    help_template: list[str] = field(
+        default_factory=lambda: ["bullpen", "polymarket", "buy", "--help"]
+    )
+    timeout_seconds: float = 30.0
+    # Log the command without running it. Start here.
+    dry_run: bool = True
+
+
+@dataclass
+class ExecutionConfig:
+    # paper   -> simulate against the recorded book (default, safe)
+    # bullpen -> shell out to the Bullpen CLI
+    # clob    -> sign EIP-712 orders directly via py-clob-client
+    backend: str = "paper"
+    bullpen: BullpenConfig = field(default_factory=BullpenConfig)
+
+
+@dataclass
 class StrategyConfig:
     name: str = "volume_threshold"
     params: dict[str, Any] = field(default_factory=dict)
@@ -66,6 +111,7 @@ class Config:
     risk: RiskConfig = field(default_factory=RiskConfig)
     fees: FeeConfig = field(default_factory=FeeConfig)
     markets: MarketsConfig = field(default_factory=MarketsConfig)
+    execution: ExecutionConfig = field(default_factory=ExecutionConfig)
     strategy: StrategyConfig = field(default_factory=StrategyConfig)
     gamma_url: str = "https://gamma-api.polymarket.com"
     clob_url: str = "https://clob.polymarket.com"
@@ -102,6 +148,13 @@ def load_config(path: str | Path | None = None) -> Config:
     ):
         if section in raw:
             _merge(target, raw.pop(section))
+
+    if "execution" in raw:
+        ex = raw.pop("execution") or {}
+        bullpen_raw = ex.pop("bullpen", None)
+        _merge(cfg.execution, ex)
+        if bullpen_raw:
+            _merge(cfg.execution.bullpen, bullpen_raw)
 
     if "strategy" in raw:
         strat = raw.pop("strategy") or {}

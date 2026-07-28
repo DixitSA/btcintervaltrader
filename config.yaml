@@ -39,6 +39,36 @@ risk:
   # how accounts go to zero even with a genuine edge.
   kelly_fraction: 0.25
 
+execution:
+  # paper   -> simulate against the live book (safe, default)
+  # bullpen -> shell out to the Bullpen CLI
+  # clob    -> sign EIP-712 orders directly (needs py-clob-client + wallet)
+  backend: paper
+
+  bullpen:
+    binary: bullpen
+    # VERIFY THIS against `bullpen polymarket buy --help` on your machine, then
+    # run `python -m btcbot verify-bullpen`. These flags are a starting point,
+    # not confirmed syntax -- the published docs were unreachable when this was
+    # written. Placeholders: {token_id} {side} {shares} {price} {slug}
+    # {condition_id} {outcome}
+    buy_template:
+      - bullpen
+      - polymarket
+      - buy
+      - --token
+      - "{token_id}"
+      - --shares
+      - "{shares}"
+      - --limit-price
+      - "{price}"
+      - --yes
+      - --json
+    help_template: [bullpen, polymarket, buy, --help]
+    timeout_seconds: 30.0
+    # Logs the command instead of running it. Leave true until verified.
+    dry_run: true
+
 strategy:
   name: volume_threshold
   params:
