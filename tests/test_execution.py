@@ -26,6 +26,21 @@ def write_fake_bullpen(tmp_path, body: str) -> str:
     return f"{tmp_path}{os.pathsep}{os.environ['PATH']}"
 
 
+# The fake above is an extensionless /bin/sh script. Windows cannot use it:
+# shutil.which only matches names carrying a PATHEXT extension, so the
+# executor's own "not found on PATH" guard fires before the test starts, and
+# the bodies below are POSIX (touch, echo '...', >&2) besides.
+#
+# This is a limitation of the SCAFFOLDING, not of the code under test -- the
+# argv rendering and fill parsing being checked are platform-independent, so
+# these still run on Linux/macOS. Skipped rather than deleted so that coverage
+# of the order path is not lost on the platforms that can exercise it.
+requires_posix_shell = pytest.mark.skipif(
+    os.name == "nt",
+    reason="fake bullpen binary needs a POSIX shell; scaffolding limitation, not a code failure",
+)
+
+
 @pytest.fixture
 def bullpen_cfg() -> Config:
     cfg = Config()
@@ -67,6 +82,7 @@ def test_bullpen_missing_binary_is_a_clear_error(bullpen_cfg, monkeypatch, tmp_p
         BullpenExecutor(bullpen_cfg)
 
 
+@requires_posix_shell
 def test_bullpen_renders_expected_argv(bullpen_cfg, monkeypatch, tmp_path):
     monkeypatch.setenv("PATH", write_fake_bullpen(tmp_path, "exit 0\n"))
     ex = BullpenExecutor(bullpen_cfg)
@@ -82,6 +98,7 @@ def test_bullpen_renders_expected_argv(bullpen_cfg, monkeypatch, tmp_path):
     assert not any("{" in part for part in argv)
 
 
+@requires_posix_shell
 def test_bullpen_dry_run_does_not_execute(bullpen_cfg, monkeypatch, tmp_path):
     marker = tmp_path / "ran"
     monkeypatch.setenv("PATH", write_fake_bullpen(tmp_path, f"touch {marker}\nexit 0\n"))
@@ -92,6 +109,7 @@ def test_bullpen_dry_run_does_not_execute(bullpen_cfg, monkeypatch, tmp_path):
     assert not marker.exists()
 
 
+@requires_posix_shell
 def test_bullpen_parses_json_fill(bullpen_cfg, monkeypatch, tmp_path):
     monkeypatch.setenv(
         "PATH",
@@ -105,6 +123,7 @@ def test_bullpen_parses_json_fill(bullpen_cfg, monkeypatch, tmp_path):
     assert fill.shares == pytest.approx(9.5)
 
 
+@requires_posix_shell
 def test_bullpen_parses_nested_result(bullpen_cfg, monkeypatch, tmp_path):
     monkeypatch.setenv(
         "PATH",
@@ -118,6 +137,7 @@ def test_bullpen_parses_nested_result(bullpen_cfg, monkeypatch, tmp_path):
     assert fill.price == pytest.approx(0.31)
 
 
+@requires_posix_shell
 def test_bullpen_nonzero_exit_is_not_a_fill(bullpen_cfg, monkeypatch, tmp_path):
     monkeypatch.setenv(
         "PATH", write_fake_bullpen(tmp_path, 'echo "insufficient balance" >&2\nexit 1\n')
@@ -127,6 +147,7 @@ def test_bullpen_nonzero_exit_is_not_a_fill(bullpen_cfg, monkeypatch, tmp_path):
     assert ex.fills == []
 
 
+@requires_posix_shell
 def test_bullpen_unparseable_output_falls_back_to_limit(bullpen_cfg, monkeypatch, tmp_path):
     """A fill we cannot parse must still be recorded as a position -- money moved.
 
@@ -142,6 +163,7 @@ def test_bullpen_unparseable_output_falls_back_to_limit(bullpen_cfg, monkeypatch
     assert fill.shares == pytest.approx(10)
 
 
+@requires_posix_shell
 def test_bullpen_bad_placeholder_is_rejected(bullpen_cfg, monkeypatch, tmp_path):
     monkeypatch.setenv("PATH", write_fake_bullpen(tmp_path, "exit 0\n"))
     bullpen_cfg.execution.bullpen.buy_template = ["bullpen", "--x", "{not_a_field}"]
