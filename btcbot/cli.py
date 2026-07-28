@@ -154,10 +154,20 @@ def cmd_sweep(args: argparse.Namespace) -> int:
     cfg.risk.daily_loss_limit_usd = 1e12
     cfg.risk.bankroll_usd = 100_000.0
 
-    print(f"\n{'direction':<10} {'thresh':>10} {'trades':>7} {'win%':>7} {'BE%':>7} {'ROI':>9} {'z':>7}")
-    print("-" * 62)
+    # Stops are disabled for the same reason the risk caps are: a sweep measures
+    # the RULE. It also keeps the payoff BINARY, which is what makes the
+    # win-rate z-score a valid statistic at all -- with stops on, `won` means
+    # "P&L > 0" while break-even is an entry PRICE, and comparing the two
+    # produces large negative z on data with no edge whatsoever. What stops
+    # actually cost you is a separate question, answered by `compare-exits`.
+    directions = ("follow", "fade", "up", "down")
+    n_tests = len(args.thresholds) * len(directions)
+
+    print(f"\n{'direction':<10} {'thresh':>10} {'trades':>7} {'win%':>7} {'BE%':>7} {'ROI':>9} {'t':>7} {'z':>7}")
+    print("-" * 70)
+    best = None
     for threshold in args.thresholds:
-        for direction in ("follow", "fade", "up", "down"):
+        for direction in directions:
             strategy = build_strategy(
                 "volume_threshold",
                 {
@@ -166,18 +176,37 @@ def cmd_sweep(args: argparse.Namespace) -> int:
                     "assumed_edge": args.assumed_edge,
                 },
             )
-            rep = run_backtest(snapshots, strategy, cfg)
+            rep = run_backtest(snapshots, strategy, cfg, use_exits=False)
             wr = f"{rep.win_rate:.1%}" if rep.win_rate is not None else "-"
             be = f"{rep.breakeven_win_rate:.1%}" if rep.breakeven_win_rate is not None else "-"
             roi = f"{rep.roi:+.2%}" if rep.roi is not None else "-"
+            t = f"{rep.roi_t_stat:+.2f}" if rep.roi_t_stat is not None else "-"
             z = f"{rep.z_score:+.2f}" if rep.z_score is not None else "-"
+            if rep.roi_t_stat is not None and (best is None or rep.roi_t_stat > best[0]):
+                best = (rep.roi_t_stat, f"{direction}@{threshold:,.0f}", rep.n)
             print(
-                f"{direction:<10} {threshold:>10,.0f} {rep.n:>7} {wr:>7} {be:>7} {roi:>9} {z:>7}"
+                f"{direction:<10} {threshold:>10,.0f} {rep.n:>7} {wr:>7} {be:>7} {roi:>9} {t:>7} {z:>7}"
             )
+
     print(
-        "\nRead the z column, not the ROI column. |z| under 2 means the result "
-        "is consistent with having no edge at all."
+        f"\nRead the t column, not the ROI column and not the win rate.\n"
+        f"This grid ran {n_tests} tests ({len(args.thresholds)} thresholds x "
+        f"{len(directions)} directions). Picking the best cell out of {n_tests} and\n"
+        f"judging it at |t| > 2 is not a 5% test -- that threshold is for ONE\n"
+        f"pre-chosen hypothesis. Across {n_tests} tries something clears it routinely\n"
+        f"on pure noise, and that cell is the one you will most want to trade."
     )
+    if best is not None:
+        t_best, label, n_best = best
+        print(f"\nbest cell by t: {label} (t={t_best:+.2f}, n={n_best})")
+        if t_best <= 2.0:
+            print("  -> Nothing here clears even the single-test bar. No edge found.")
+        else:
+            print(
+                "  -> Clears the single-test bar, but it was SELECTED from "
+                f"{n_tests}.\n     Confirm it on data you did not sweep over before "
+                "believing it."
+            )
     return 0
 
 

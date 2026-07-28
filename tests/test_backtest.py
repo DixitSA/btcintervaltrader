@@ -144,6 +144,46 @@ def test_no_positive_edge_with_stops_either(sim_snapshots, direction):
     )
 
 
+def test_sweep_keeps_payoffs_binary_so_its_z_column_is_valid(sim_dir, monkeypatch):
+    """`sweep` must run with stops OFF.
+
+    The win-rate z-score compares a win RATE against an entry PRICE. That is
+    only like-for-like while payoffs are binary. With stops on, `won` becomes
+    "P&L > 0" while break-even stays a price, and this same no-edge dataset
+    reports z around -3 to -6 in EVERY cell -- an artefact of the mismatched
+    null, not a finding. The t-statistic is unaffected either way, which is
+    why it is the column the docs tell you to read.
+    """
+    import argparse as _argparse
+
+    from btcbot import cli
+
+    seen: list = []
+    real = cli.run_backtest
+
+    def spy(snapshots, strategy, cfg, *args, **kwargs):
+        seen.append(kwargs.get("use_exits", args[0] if args else None))
+        return real(snapshots, strategy, cfg, *args, **kwargs)
+
+    monkeypatch.setattr(cli, "run_backtest", spy)
+
+    rc = cli.cmd_sweep(
+        _argparse.Namespace(
+            config=None,
+            data_dir=str(sim_dir),
+            thresholds=[300_000.0],
+            assumed_edge=0.05,
+        )
+    )
+
+    assert rc == 0
+    assert seen, "sweep ran no backtests"
+    assert all(v is False for v in seen), (
+        f"sweep ran with use_exits={sorted(set(map(str, seen)))}; the z column "
+        "is only a valid statistic while payoffs are binary"
+    )
+
+
 def test_stops_are_actually_exercised(sim_snapshots):
     """Guards against the stop silently never firing."""
     strat = build_strategy(
