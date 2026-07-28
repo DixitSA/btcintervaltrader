@@ -51,6 +51,22 @@ def cents_to_prob(cents: float) -> float:
     return float(cents) / 100.0
 
 
+def _as_float(value: Any) -> Optional[float]:
+    """Coerce a wire value to float, or None.
+
+    The live API sends numbers as decimal strings on the `*_fp` fields, so an
+    isinstance(value, (int, float)) check drops them on the floor.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    try:
+        return float(str(value).replace(",", "").strip())
+    except (TypeError, ValueError):
+        return None
+
+
 class KalshiAuth:
     """RSA-PSS request signing.
 
@@ -111,7 +127,11 @@ def parse_orderbook(raw: dict[str, Any]) -> tuple[Book, Book]:
     Kalshi gives resting bids only. Each side's ASK is synthesised from the
     opposite side's bid, which is what makes a two-sided book for each outcome.
     """
-    book = raw.get("orderbook", raw) or {}
+    # The live API nests the levels under `orderbook_fp` (fixed-point: prices
+    # and sizes are decimal STRINGS in dollars). Older/documented responses use
+    # `orderbook` with integer cents. Accept either, and fall back to a payload
+    # that is already the book itself.
+    book = raw.get("orderbook_fp") or raw.get("orderbook") or raw or {}
 
     def levels(key_cents: str, key_dollars: str) -> list[tuple[float, float]]:
         # Newer responses use *_dollars string pairs; older use cent integers.
@@ -208,11 +228,19 @@ def parse_market(raw: dict[str, Any]) -> Optional[Market]:
         return None
     open_ts = parse_open_ts(raw) or (close_ts - 900)
 
+    # The live API returns these as decimal STRINGS under `*_fp` names
+    # ("644509.10"), not the bare numbers the docs imply. Reading only the
+    # documented names leaves volume at 0.0 for every market, which silently
+    # makes any volume-gated strategy skip everything.
+    #
+    # NOTE ON UNITS: Kalshi's volume is CONTRACTS, not dollars. Each contract
+    # is $1 notional, so this is an upper bound on matched USD volume, not the
+    # figure itself. `min_volume_usd` compares against it directly.
     volume = 0.0
-    for key in ("dollar_volume", "volume", "volume_24h"):
-        value = raw.get(key)
-        if isinstance(value, (int, float)):
-            volume = float(value)
+    for key in ("dollar_volume", "volume_fp", "volume", "volume_24h_fp", "volume_24h"):
+        value = _as_float(raw.get(key))
+        if value is not None:
+            volume = value
             break
 
     return Market(
@@ -226,7 +254,11 @@ def parse_market(raw: dict[str, Any]) -> Optional[Market]:
         start_ts=open_ts,
         end_ts=close_ts,
         volume=volume,
-        liquidity=float(raw.get("open_interest") or 0.0),
+        liquidity=(
+            _as_float(raw.get("open_interest_fp"))
+            or _as_float(raw.get("open_interest"))
+            or 0.0
+        ),
         strike=parse_strike(raw),
     )
 
