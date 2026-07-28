@@ -7,3 +7,8 @@ __pycache__/
 venv/
 .pytest_cache/
 *.jsonl
+
+# Recorder supervisor runtime artifacts (restart log, pid of the running
+# supervisor). Local to one machine's run; the data itself is under data/.
+recorder-supervisor.log
+recorder.pid
