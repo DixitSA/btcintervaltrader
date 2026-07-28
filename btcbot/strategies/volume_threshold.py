@@ -20,6 +20,23 @@ Backtest all four. If the rule carries a real edge, one of them will beat
 break-even net of fees on a decent sample. If none does -- which is what the
 structure of these markets predicts -- you have your answer from your own data
 instead of from a video.
+
+TWO THINGS THE NAME `min_volume_usd` GETS WRONG ON KALSHI, both measured
+against live KXBTC15M data rather than assumed:
+
+1. THE UNIT IS CONTRACTS, NOT DOLLARS. Kalshi reports `volume_fp` in
+   contracts. A contract settles at $0 or $1, so dollar turnover is contracts
+   x average traded price and is always smaller. A window that shows 1.6M
+   here is roughly $120k of actual dollar volume -- so a "$500k" threshold is
+   not remotely the filter it sounds like.
+
+2. IT GATES ENTRY TIME, NOT WHICH WINDOWS YOU TRADE. window_volume is
+   cumulative and only ever rises inside a window, so every window crosses
+   every threshold sooner or later. Raising the threshold does not make the
+   rule more selective about windows; it makes it enter later, when less of
+   the window is left and the price has already moved toward the outcome.
+   That is a materially different bet, and it is the one actually being
+   tested here.
 """
 
 from __future__ import annotations

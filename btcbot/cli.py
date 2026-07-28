@@ -194,7 +194,12 @@ def cmd_sweep(args: argparse.Namespace) -> int:
         f"{len(directions)} directions). Picking the best cell out of {n_tests} and\n"
         f"judging it at |t| > 2 is not a 5% test -- that threshold is for ONE\n"
         f"pre-chosen hypothesis. Across {n_tests} tries something clears it routinely\n"
-        f"on pure noise, and that cell is the one you will most want to trade."
+        f"on pure noise, and that cell is the one you will most want to trade.\n"
+        f"\n"
+        f"'thresh' is in CONTRACTS on Kalshi, not dollars -- the venue reports\n"
+        f"volume in contracts. It is also cumulative within a window, so it gates\n"
+        f"HOW LATE you enter, not which windows you take. Every window crosses\n"
+        f"every threshold eventually."
     )
     if best is not None:
         t_best, label, n_best = best

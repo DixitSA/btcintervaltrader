@@ -115,7 +115,16 @@ class Snapshot:
     up_book: Book
     down_book: Book
     spot: Optional[float] = None
-    # Cumulative matched volume in THIS window, in USD.
+    # Cumulative matched volume so far in THIS window. NOT in USD on Kalshi:
+    # the venue reports CONTRACTS (`volume_fp`), and a contract settles at $0
+    # or $1, so dollar volume is contracts x average traded price and is always
+    # the smaller number. Measured on live KXBTC15M, a window reaches ~1.6M
+    # contracts for roughly $120k of actual dollar turnover.
+    #
+    # It is also CUMULATIVE and monotonically rising within a window, so a
+    # threshold on it does not select which windows to trade -- every window
+    # crosses every threshold eventually. It selects WHEN in the window you
+    # enter. See strategies/volume_threshold.py.
     window_volume: float = 0.0
 
     def book(self, side: str) -> Book:
