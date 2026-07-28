@@ -14,7 +14,13 @@ data_dir: data
 kalshi_url: https://api.elections.kalshi.com/trade-api/v2
 gamma_url: https://gamma-api.polymarket.com
 clob_url: https://clob.polymarket.com
-spot_url: https://api.binance.com
+# api.binance.com returns 451 (geo-blocked) from the US, which makes every
+# recorded snapshot carry spot: null -- silently, since the feed only warns.
+# data-api.binance.vision is Binance's public market-data mirror: same REST
+# shape, same BTCUSDT symbol, same global book, no geo-block.
+# NB the settlement source for KXBTC15M is CF Benchmarks BRTI, not Binance;
+# this feed is for signals only (see spot.py).
+spot_url: https://data-api.binance.vision
 
 markets:
   # Every window family to trade. ONE 15-minute family caps you at 4 trades/hour
