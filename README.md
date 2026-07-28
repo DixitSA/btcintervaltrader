@@ -183,6 +183,63 @@ against real books. It prints a ledger on exit.
 
 ---
 
+## Trade volume, and why DCA does not apply here
+
+A common plan is "make lots of small trades and dollar-cost-average in." That
+reasoning does not transfer to these markets, and the direction of the error is
+expensive.
+
+**DCA works on an accumulating asset with positive long-run drift.** You keep
+buying, you hold through the dips, the drift eventually pays. These binaries do
+not accumulate: each one resolves to $0 or $1 in fifteen minutes and is gone.
+There is no position being averaged into and no drift to wait for.
+
+**Volume is a multiplier on the sign of your edge.** Here is the same strategy
+above (−1.06% per trade) resampled at different trade counts:
+
+```
+  trades   P(profit)   median ROI    5th pct   95th pct
+      10      48.6%       -0.80%    -35.17%     31.75%
+     100      45.1%       -0.79%    -11.60%      9.09%
+    1000      29.3%       -1.08%     -4.44%      2.37%
+    5000      13.4%       -1.02%     -2.54%      0.49%
+```
+
+The mean never improves. Volume just collapses the variance around it, so at 10
+trades you are a coin flip and at 5,000 you have a 13% chance of being ahead.
+Variance is the only thing that can rescue a negative-edge bettor, and volume is
+what destroys variance. **Establish the edge first; scale volume second.**
+
+### Raising trade count the honest way
+
+One 15-minute family gives you 4 windows/hour, one position at a time. To trade
+more without changing *what* you are betting on, trade more families:
+
+```yaml
+markets:
+  slug_prefixes:
+    - btc-updown-15m
+    - btc-updown-5m
+    - eth-updown-15m
+    - sol-updown-15m
+risk:
+  max_concurrent_positions: 5
+  max_total_exposure_fraction: 0.10
+```
+
+Three families instead of one took the control backtest from 163 to 495 trades.
+
+> ⚠️ **Raise `max_concurrent_positions` and you must set
+> `max_total_exposure_fraction`.** Kelly sizes every position as though it were
+> your only one, so five concurrent positions is five times the intended risk
+> unless total exposure is capped. The risk layer enforces the cap against live
+> portfolio state and will shrink or refuse an order that would breach it.
+
+The backtester replays snapshots in **time order**, not window order, so
+overlapping markets compete for the same capital exactly as they would live.
+
+---
+
 ## Stop losses, and what they actually cost
 
 Thresholds are in **probability points**, not percent. Entered at `0.60` with
@@ -341,7 +398,7 @@ book-depth check, an hourly trade cap, and a daily loss limit.
 ## Tests
 
 ```bash
-python -m pytest tests/ -q     # 86 passing
+python -m pytest tests/ -q     # 97 passing
 ```
 
 ---

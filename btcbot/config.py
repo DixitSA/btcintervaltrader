@@ -23,6 +23,11 @@ class RiskConfig:
     max_stake_fraction: float = 0.02
     max_concurrent_positions: int = 1
     max_trades_per_hour: int = 8
+    # Cap on the TOTAL cost basis of all open positions, as a fraction of the
+    # starting bankroll. This is the guard that matters once you trade many
+    # windows at once: Kelly sizes each position as if it were the only one, so
+    # N concurrent positions is N times the intended risk without this.
+    max_total_exposure_fraction: float = 0.10
     daily_loss_limit_usd: float = 20.0
     # Refuse to buy above this price: the downside tail is not worth the
     # remaining upside, and fees bite hardest here.
@@ -44,7 +49,11 @@ class FeeConfig:
 
 @dataclass
 class MarketsConfig:
-    slug_prefix: str = "btc-updown-15m"
+    # Every family of windows to trade. More families = more trades per hour.
+    # Polymarket runs 5m/15m/1h windows across several assets, so this is the
+    # honest way to raise throughput -- unlike shortening the hold, it does not
+    # change what you are betting on.
+    slug_prefixes: list[str] = field(default_factory=lambda: ["btc-updown-15m"])
     window_seconds: int = 900
     # Ignore a window until it has at least this much time left; and stop
     # entering once it has less than min_seconds_remaining.
@@ -181,6 +190,12 @@ def load_config(path: str | Path | None = None) -> Config:
         return cfg
 
     raw = yaml.safe_load(path.read_text()) or {}
+    # Backwards compatibility: a single slug_prefix still works.
+    markets_raw = raw.get("markets") or {}
+    if "slug_prefix" in markets_raw:
+        legacy = markets_raw.pop("slug_prefix")
+        markets_raw.setdefault("slug_prefixes", [legacy] if isinstance(legacy, str) else legacy)
+
     for section, target in (
         ("risk", cfg.risk),
         ("fees", cfg.fees),

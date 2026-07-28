@@ -50,6 +50,9 @@ class Runner:
 
         self._traded_windows: set[str] = set()
         self._market_cache: tuple[float, list[Market]] = (0.0, [])
+        # slug -> window end, so families with different durations (5m/15m/1h)
+        # each settle at their own expiry rather than a single global one.
+        self._window_end: dict[str, float] = {}
 
     def close(self) -> None:
         self.gamma.close()
@@ -63,7 +66,7 @@ class Runner:
         if now - cached_at < 20.0 and cached:
             return cached
         try:
-            markets = self.gamma.fetch_open_markets(self.cfg.markets.slug_prefix)
+            markets = self.gamma.fetch_open_markets(self.cfg.markets.slug_prefixes)
         except Exception as exc:  # noqa: BLE001 - a discovery blip must not kill the loop
             log.warning("market discovery failed: %s", exc)
             return cached
@@ -140,9 +143,11 @@ class Runner:
         saw, which converges to 0 or 1 as a window closes, and log loudly so
         the approximation is never silent.
         """
-        grace = self.cfg.markets.window_seconds + 60
         for slug, pos in list(self.portfolio.positions.items()):
-            if now <= pos.entry_ts + grace:
+            end_ts = self._window_end.get(
+                slug, pos.entry_ts + self.cfg.markets.window_seconds
+            )
+            if now <= end_ts + 60:
                 continue
 
             mark = pos.last_mark if pos.last_mark is not None else pos.entry_price
@@ -196,7 +201,7 @@ class Runner:
                 log.warning("%s: no entry, %s", market.slug, halted)
                 continue
 
-            order, rejection = self.risk.evaluate(snap, signal)
+            order, rejection = self.risk.evaluate(snap, signal, portfolio=self.portfolio)
             if order is None:
                 log.debug("%s: declined (%s)", market.slug, rejection)
                 continue
@@ -215,6 +220,7 @@ class Runner:
 
             self.risk.on_trade(now)
             self._traded_windows.add(market.slug)
+            self._window_end[market.slug] = market.end_ts
             log.info(
                 "%s: bought %s %.2f @ %.3f | %s | equity $%.2f",
                 market.slug,

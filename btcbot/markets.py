@@ -37,7 +37,13 @@ class GammaClient:
     def __exit__(self, *exc: Any) -> None:
         self.close()
 
-    def fetch_open_markets(self, slug_prefix: str, limit: int = 100) -> list[Market]:
+    def fetch_open_markets(
+        self, slug_prefixes: str | list[str], limit: int = 250
+    ) -> list[Market]:
+        """All open windows whose slug starts with any of `slug_prefixes`."""
+        if isinstance(slug_prefixes, str):
+            slug_prefixes = [slug_prefixes]
+
         resp = self._http.get(
             f"{self.base_url}/markets",
             params={
@@ -51,7 +57,8 @@ class GammaClient:
         resp.raise_for_status()
         markets = []
         for raw in resp.json():
-            if not str(raw.get("slug", "")).startswith(slug_prefix):
+            slug = str(raw.get("slug", ""))
+            if not any(slug.startswith(p) for p in slug_prefixes):
                 continue
             parsed = parse_market(raw)
             if parsed is not None:

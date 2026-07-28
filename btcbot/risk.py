@@ -69,8 +69,18 @@ class RiskManager:
             return "window not open yet"
         return None
 
-    def evaluate(self, snap: Snapshot, signal: Signal) -> tuple[Optional[Order], Optional[str]]:
-        """Turn a signal into a sized order, or explain why not."""
+    def evaluate(
+        self,
+        snap: Snapshot,
+        signal: Signal,
+        portfolio=None,
+    ) -> tuple[Optional[Order], Optional[str]]:
+        """Turn a signal into a sized order, or explain why not.
+
+        `portfolio` enables the total-exposure cap. Without it the other gates
+        still apply, but nothing stops N concurrent positions from each being
+        sized as though it were the only one.
+        """
         now = snap.ts
         self._roll_day(now)
 
@@ -127,6 +137,20 @@ class RiskManager:
             self.state.bankroll * self.cfg.max_stake_fraction,
             self.cfg.max_stake_per_trade_usd,
         )
+
+        # Total exposure cap. Kelly sizes each position in isolation, so
+        # without this, trading many windows at once multiplies the intended
+        # risk by the number of open positions.
+        if portfolio is not None and self.cfg.max_total_exposure_fraction is not None:
+            budget = portfolio.starting_cash * self.cfg.max_total_exposure_fraction
+            in_use = sum(p.cost_basis for p in portfolio.positions.values())
+            headroom = budget - in_use
+            if headroom <= 0:
+                return None, (
+                    f"total exposure ${in_use:.2f} at cap ${budget:.2f}"
+                )
+            stake = min(stake, headroom, portfolio.cash)
+
         if stake <= 0.5:
             return None, f"stake ${stake:.2f} below minimum"
 

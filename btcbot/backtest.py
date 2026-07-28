@@ -287,118 +287,130 @@ def run_backtest(
 
     report = BacktestReport(starting_bankroll=portfolio.starting_cash)
     report.portfolio = portfolio
+    report.windows_seen = len(windows)
 
-    for slug in sorted(windows, key=lambda s: windows[s][0].ts):
-        window = windows[slug]
-        report.windows_seen += 1
-        outcome = infer_outcome(window)
+    outcomes = {slug: infer_outcome(w) for slug, w in windows.items()}
+    final_ts = {slug: w[-1].ts for slug, w in windows.items()}
 
-        signalled = False
-        entry_fill: Optional[Fill] = None
-        reason_text = ""
-        closed_early = False
+    # Replay in TIME order, not window order, so overlapping markets compete
+    # for the same capital exactly as they would live. Iterating window by
+    # window would let every market spend the full bankroll independently.
+    ordered = sorted(
+        (s for w in windows.values() for s in w), key=lambda s: (s.ts, s.market.slug)
+    )
 
-        for snap in window:
-            # -- manage an open position first -------------------------
-            if portfolio.has_position(slug):
-                pos = portfolio.positions[slug]
-                mark = mark_for(snap, pos.side)
-                if mark is not None:
-                    portfolio.update_mark(slug, mark)
+    entered: set[str] = set()
+    signalled: set[str] = set()
+    entry_reason: dict[str, str] = {}
 
-                decision = exit_policy.evaluate(
-                    pos, mark, snap.ts, snap.market.seconds_remaining(snap.ts)
-                )
-                if decision.should_exit:
-                    exit_order = Order(
-                        side=pos.side,
-                        shares=pos.shares,
-                        limit_price=0.0,  # take whatever the bid gives
-                        reason=decision.detail,
-                    )
-                    exit_fill = executor.sell(snap, exit_order)
-                    if exit_fill is not None:
-                        trade = portfolio.close(
-                            slug,
-                            exit_fill.price,
-                            snap.ts,
-                            decision.reason,
-                            fee=exit_fill.fee,
-                            outcome=outcome,
-                        )
-                        risk.on_settlement(trade.pnl)
-                        report.exits[decision.reason] += 1
-                        closed_early = True
-                        break
-                    report.rejections["exit fill failed"] += 1
-                portfolio.record_equity(snap.ts)
-                continue
-
-            # -- otherwise look for an entry ---------------------------
-            if entry_fill is not None:
-                continue
-
-            signal = strategy.decide(snap)
-            if signal is None:
-                continue
-            signalled = True
-
-            if guard.check(portfolio):
-                report.rejections[f"halted: {guard.tripped_reason}"] += 1
-                continue
-
-            order, rejection = risk.evaluate(snap, signal)
-            if order is None:
-                if rejection:
-                    report.rejections[rejection] += 1
-                continue
-
-            fill = executor.buy(snap, order)
-            if fill is None:
-                report.rejections["paper fill failed"] += 1
-                continue
-
-            try:
-                portfolio.open(
-                    slug, fill.side, fill.shares, fill.price, snap.ts, fee=fill.fee
-                )
-            except ValueError as exc:
-                report.rejections[str(exc).split(":")[0]] += 1
-                continue
-
-            entry_fill = fill
-            reason_text = order.reason
-            risk.on_trade(snap.ts)
-            portfolio.record_equity(snap.ts)
-
-        if signalled:
-            report.windows_with_signal += 1
-
-        if entry_fill is None:
-            continue
-
-        if not closed_early and portfolio.has_position(slug):
-            trade = portfolio.settle(
-                slug, outcome, window[-1].ts, cfg.fees.winnings_fee_bps
-            )
-            risk.on_settlement(trade.pnl)
-            report.exits[trade.exit_reason] += 1
-
+    def record(slug: str) -> None:
         last = portfolio.closed[-1]
-        portfolio.record_equity(window[-1].ts)
+        report.exits[last.exit_reason] += 1
         report.trades.append(
             WindowResult(
                 slug=slug,
                 side=last.side,
                 shares=last.shares,
                 entry_price=last.entry_price,
-                outcome=outcome,
+                outcome=outcomes.get(slug),
                 pnl=last.pnl,
-                reason=reason_text,
+                reason=entry_reason.get(slug, ""),
                 exit_reason=last.exit_reason,
                 exit_price=last.exit_price,
             )
         )
 
+    for snap in ordered:
+        slug = snap.market.slug
+
+        # -- manage an open position -----------------------------------
+        if portfolio.has_position(slug):
+            pos = portfolio.positions[slug]
+            mark = mark_for(snap, pos.side)
+            if mark is not None:
+                portfolio.update_mark(slug, mark)
+
+            decision = exit_policy.evaluate(
+                pos, mark, snap.ts, snap.market.seconds_remaining(snap.ts)
+            )
+            if decision.should_exit:
+                exit_fill = executor.sell(
+                    snap,
+                    Order(
+                        side=pos.side,
+                        shares=pos.shares,
+                        limit_price=0.0,  # take whatever the bid gives
+                        reason=decision.detail,
+                    ),
+                )
+                if exit_fill is not None:
+                    trade = portfolio.close(
+                        slug,
+                        exit_fill.price,
+                        snap.ts,
+                        decision.reason,
+                        fee=exit_fill.fee,
+                        outcome=outcomes.get(slug),
+                    )
+                    risk.on_settlement(trade.pnl)
+                    record(slug)
+                else:
+                    report.rejections["exit fill failed"] += 1
+
+            # Window is closing and we still hold: settle at the outcome.
+            if snap.ts >= final_ts[slug] and portfolio.has_position(slug):
+                trade = portfolio.settle(
+                    slug, outcomes.get(slug), snap.ts, cfg.fees.winnings_fee_bps
+                )
+                risk.on_settlement(trade.pnl)
+                record(slug)
+
+            portfolio.record_equity(snap.ts)
+            continue
+
+        # -- otherwise consider an entry -------------------------------
+        if slug in entered:
+            continue
+
+        signal = strategy.decide(snap)
+        if signal is None:
+            continue
+        signalled.add(slug)
+
+        if guard.check(portfolio):
+            report.rejections[f"halted: {guard.tripped_reason}"] += 1
+            continue
+
+        order, rejection = risk.evaluate(snap, signal, portfolio=portfolio)
+        if order is None:
+            if rejection:
+                report.rejections[rejection] += 1
+            continue
+
+        fill = executor.buy(snap, order)
+        if fill is None:
+            report.rejections["paper fill failed"] += 1
+            continue
+
+        try:
+            portfolio.open(slug, fill.side, fill.shares, fill.price, snap.ts, fee=fill.fee)
+        except ValueError as exc:
+            report.rejections[str(exc).split(":")[0]] += 1
+            continue
+
+        entered.add(slug)
+        entry_reason[slug] = order.reason
+        risk.on_trade(snap.ts)
+        portfolio.record_equity(snap.ts)
+
+    # Anything still open (dataset ended mid-window) settles at its outcome.
+    for slug in list(portfolio.positions):
+        trade = portfolio.settle(
+            slug, outcomes.get(slug), final_ts[slug], cfg.fees.winnings_fee_bps
+        )
+        risk.on_settlement(trade.pnl)
+        record(slug)
+
+    report.windows_with_signal = len(signalled)
     report.ending_bankroll = portfolio.equity
     return report

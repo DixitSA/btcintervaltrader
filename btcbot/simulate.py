@@ -55,8 +55,35 @@ def generate(
     volume_high: float = 900_000.0,
     seed: Optional[int] = 42,
     start_ts: float = 1_750_000_000.0,
+    families: Optional[list[str]] = None,
 ) -> int:
-    """Write `n_windows` synthetic windows. Returns snapshots written."""
+    """Write `n_windows` synthetic windows per family. Returns snapshots written.
+
+    Passing more than one family produces markets whose windows OVERLAP in
+    time, which is what exercises concurrent positions and the total-exposure
+    cap. Each family walks its own independent price path.
+    """
+    if families and len(families) > 1:
+        total = 0
+        for i, fam in enumerate(families):
+            total += generate(
+                out_dir,
+                n_windows=n_windows,
+                window_seconds=window_seconds,
+                tick_seconds=tick_seconds,
+                start_spot=start_spot,
+                vol_per_year=vol_per_year,
+                spread=spread,
+                depth_shares=depth_shares,
+                volume_low=volume_low,
+                volume_high=volume_high,
+                seed=(seed + i * 977) if seed is not None else None,
+                start_ts=start_ts,
+                families=[fam],
+            )
+        return total
+
+    prefix = families[0] if families else "btc-updown-15m"
     rng = random.Random(seed)
     written = 0
     spot = start_spot
@@ -89,11 +116,11 @@ def generate(
                 cumulative = total_volume * ((i + 1) / n_ticks)
 
                 market = Market(
-                    condition_id=f"0xsim{w:06d}",
-                    slug=f"btc-updown-15m-sim-{int(w_start)}",
+                    condition_id=f"0xsim{abs(hash(prefix))%9999:04d}{w:06d}",
+                    slug=f"{prefix}-sim-{int(w_start)}",
                     question=f"Bitcoin Up or Down? Price to beat ${strike:,.2f}",
-                    up_token_id=f"sim-up-{w}",
-                    down_token_id=f"sim-down-{w}",
+                    up_token_id=f"{prefix}-up-{w}",
+                    down_token_id=f"{prefix}-down-{w}",
                     start_ts=w_start,
                     end_ts=w_end,
                     volume=cumulative,
@@ -116,11 +143,11 @@ def generate(
             # Final snapshot at expiry so the backtester can read the outcome.
             final_up = 1.0 if spot > strike else 0.0
             market_final = Market(
-                condition_id=f"0xsim{w:06d}",
-                slug=f"btc-updown-15m-sim-{int(w_start)}",
+                condition_id=f"0xsim{abs(hash(prefix))%9999:04d}{w:06d}",
+                slug=f"{prefix}-sim-{int(w_start)}",
                 question=f"Bitcoin Up or Down? Price to beat ${strike:,.2f}",
-                up_token_id=f"sim-up-{w}",
-                down_token_id=f"sim-down-{w}",
+                up_token_id=f"{prefix}-up-{w}",
+                down_token_id=f"{prefix}-down-{w}",
                 start_ts=w_start,
                 end_ts=w_end,
                 volume=total_volume,

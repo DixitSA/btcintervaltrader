@@ -11,7 +11,15 @@ clob_url: https://clob.polymarket.com
 spot_url: https://api.binance.com
 
 markets:
-  slug_prefix: btc-updown-15m
+  # Every window family to trade. ONE 15-minute family caps you at 4 trades/hour
+  # (one window at a time). Adding families is the honest way to raise trade
+  # count -- it does not change what you are betting on. Uncomment to widen:
+  slug_prefixes:
+    - btc-updown-15m
+    # - btc-updown-5m
+    # - btc-updown-1h
+    # - eth-updown-15m
+    # - sol-updown-15m
   window_seconds: 900
   # Do not enter in the last 30s: the book thins and you are racing bots with
   # colocated infrastructure you do not have.
@@ -32,6 +40,11 @@ risk:
   max_stake_fraction: 0.02
   max_concurrent_positions: 1
   max_trades_per_hour: 8
+  # Cap on the combined cost basis of ALL open positions, as a fraction of the
+  # starting bankroll. Raise max_concurrent_positions without raising this and
+  # you are risking N times what you think per moment: Kelly sizes each
+  # position as though it were your only one.
+  max_total_exposure_fraction: 0.10
   daily_loss_limit_usd: 20.0
   max_entry_price: 0.90
   min_entry_price: 0.10

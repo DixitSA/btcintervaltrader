@@ -185,8 +185,12 @@ def cmd_simulate(args: argparse.Namespace) -> int:
 
     cfg = load_config(args.config)
     out = args.data_dir or "data-sim"
-    n = generate(out, n_windows=args.windows, seed=args.seed)
-    print(f"wrote {n} synthetic snapshots across {args.windows} windows to '{out}'")
+    families = args.families or cfg.markets.slug_prefixes
+    n = generate(out, n_windows=args.windows, seed=args.seed, families=families)
+    print(
+        f"wrote {n} synthetic snapshots across {args.windows} windows x "
+        f"{len(families)} families to '{out}'"
+    )
     print(
         "\nThis is a NO-EDGE control world. Run:\n"
         f"  python -m btcbot sweep --data-dir {out}\n"
@@ -357,6 +361,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_sim.add_argument("--data-dir", default=None)
     p_sim.add_argument("--windows", type=int, default=400)
     p_sim.add_argument("--seed", type=int, default=42)
+    p_sim.add_argument(
+        "--families",
+        nargs="+",
+        default=None,
+        help="slug prefixes to simulate; more than one produces overlapping windows",
+    )
     p_sim.set_defaults(func=cmd_simulate)
 
     p_pa = sub.add_parser("paper", help="trade with simulated money against live books")
