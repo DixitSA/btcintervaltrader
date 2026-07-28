@@ -162,8 +162,12 @@ the correct behaviour**, not a bug.
 
 ## Part 4: Using it
 
+**Running this on your own machine? See [QUICKSTART.md](QUICKSTART.md)** — one
+setup command, Windows/macOS/Linux, plus a supervisor for the multi-day
+recording run.
+
 ```bash
-pip install -r requirements.txt
+python scripts/setup.py     # venv + deps + .env + offline self-check
 ```
 
 ### Step 0 — Check the venue connection
