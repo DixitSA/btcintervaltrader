@@ -3,9 +3,15 @@
 # mode is "paper" unless you change it AND set BTCBOT_I_UNDERSTAND_REAL_MONEY=yes.
 mode: paper
 
+# kalshi | polymarket. Kalshi is a CFTC-regulated US exchange; its fee model is
+# very different (see the fees section below) so results are NOT transferable
+# between venues.
+venue: kalshi
+
 poll_seconds: 2.0
 data_dir: data
 
+kalshi_url: https://api.elections.kalshi.com/trade-api/v2
 gamma_url: https://gamma-api.polymarket.com
 clob_url: https://clob.polymarket.com
 spot_url: https://api.binance.com
@@ -14,12 +20,12 @@ markets:
   # Every window family to trade. ONE 15-minute family caps you at 4 trades/hour
   # (one window at a time). Adding families is the honest way to raise trade
   # count -- it does not change what you are betting on. Uncomment to widen:
+  # Kalshi: SERIES TICKERS. Polymarket: slug prefixes.
   slug_prefixes:
-    - btc-updown-15m
-    # - btc-updown-5m
-    # - btc-updown-1h
-    # - eth-updown-15m
-    # - sol-updown-15m
+    - KXBTC15M          # Bitcoin up/down, 15-minute windows
+    # - KXETH15M        # Ethereum, 15-minute
+    # - KXBTCD          # Bitcoin, daily
+    # Polymarket equivalents: btc-updown-15m, btc-updown-5m, eth-updown-15m
   window_seconds: 900
   # Do not enter in the last 30s: the book thins and you are racing bots with
   # colocated infrastructure you do not have.
@@ -30,6 +36,15 @@ markets:
 
 fees:
   # VERIFY THESE against your own fills before trusting any backtest.
+  #
+  # Kalshi charges a TAKER FEE UP FRONT on every fill:
+  #     fee = ceil(0.07 * contracts * P * (1 - P)) rounded up to the cent
+  # That peaks at 1.75c per contract at 50c -- 3.5% of a 50c stake, paid on
+  # entry AND again on exit if you stop out. It is roughly 3.5x the total fee
+  # burden of the Polymarket model on the same trades.
+  kalshi_taker_coefficient: 0.07
+  kalshi_maker_coefficient: 0.0
+  # Polymarket model: no taker fee, a cut of PROFIT at settlement.
   taker_fee_bps: 0.0
   winnings_fee_bps: 200.0
   slippage: 0.005
@@ -76,8 +91,8 @@ exits:
 
 execution:
   # paper   -> simulate against the live book (safe, default)
-  # bullpen -> shell out to the Bullpen CLI
-  # clob    -> sign EIP-712 orders directly (needs py-clob-client + wallet)
+  # venue    -> place real orders through the configured venue (Kalshi/CLOB)
+  # bullpen -> shell out to the Bullpen CLI (Polymarket only)
   backend: paper
 
   bullpen:

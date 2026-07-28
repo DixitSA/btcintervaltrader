@@ -1,6 +1,7 @@
 # btcintervaltrader
 
-A research harness for Polymarket's BTC 15-minute Up/Down prediction markets.
+A research harness for BTC 15-minute Up/Down prediction markets, on **Kalshi**
+(default) or Polymarket.
 
 It can trade. But it is built to make you **prove a rule works before it lets you
 bet on it**, because the specific rule this repo started from — *"just bet when
@@ -10,28 +11,53 @@ volume is over $500k"* — does not survive contact with the evidence.
 
 ## Part 1: How these markets actually work
 
-Polymarket runs rolling **BTC Up or Down** windows (15-minute, also 5-minute and
-1-hour). Each one is a binary market:
+Kalshi runs a rolling **KXBTC15M** series — Bitcoin up or down, a new 15-minute
+window every 15 minutes. Tickers look like `KXBTC15M-26JUL281745` (series, date,
+window close in ET). Polymarket runs the same idea as `btc-updown-15m`.
 
-- At the start of the window, a reference price is fixed — the **"price to beat"**.
-- You buy **Up** shares or **Down** shares. Each share costs between $0.01 and $0.99.
-- At the end of the window, whichever side is correct pays **$1.00 per share**.
-  The other side pays $0.
+- At the start of the window a reference price is fixed — the **"price to beat"**.
+- You buy **YES** (up) or **NO** (down). Contracts trade between 1c and 99c.
+- At the close, the correct side pays **$1.00**; the other pays $0.
 
-So a share priced at $0.60 is the market saying "60% chance". Your profit on a
-winning $0.60 share is $0.40; your loss on a losing one is $0.60.
+A contract at 60c is the market saying "60% chance". Your profit on a winning
+60c contract is 40c; your loss on a losing one is 60c.
 
-Mechanically, running a bot means four things:
+Running a bot means four things:
 
-1. **Discover** open windows — Gamma API (`gamma-api.polymarket.com/markets`),
-   filtering on the `btc-updown-15m` slug prefix. → `btcbot/markets.py`
-2. **Read the book** — CLOB API (`clob.polymarket.com/book?token_id=...`) for the
-   Up and Down token IDs. → `btcbot/clob.py`
-3. **Decide** — apply a rule to the book + BTC spot. → `btcbot/strategies/`
-4. **Execute** — sign an EIP-712 order with a Polygon wallet and post it.
-   → `btcbot/execution.py` (needs the optional `py-clob-client`)
+1. **Discover** open windows — `GET /markets?series_ticker=KXBTC15M`
+   → `btcbot/venues/kalshi.py`
+2. **Read the book** — `GET /markets/{ticker}/orderbook` → same file
+3. **Decide** — apply a rule to the book + BTC spot → `btcbot/strategies/`
+4. **Execute** — `POST /portfolio/orders`, RSA-PSS signed → `btcbot/execution.py`
 
-That's the plumbing, and it's all implemented here. The plumbing is the easy part.
+### Two Kalshi specifics that will silently corrupt results
+
+**The orderbook contains only BIDS.** The `yes` and `no` arrays are both resting
+bids; there is no ask side. A bid for YES at 42c *is* an ask for NO at 58c, so:
+
+```
+yes_ask = 100 - best_no_bid
+no_ask  = 100 - best_yes_bid
+```
+
+Reading the `no` array as the yes-ask inverts every price you compute, and
+nothing will crash to tell you. `verify-venue` asserts `up_bid + down_ask = 1.00`
+against a live book as a check on this.
+
+**Fees are charged up front on every fill**, not on profit at settlement:
+
+```
+fee = ceil(0.07 x contracts x P x (1 - P))   # rounded up to the cent
+```
+
+That peaks at **1.75c per contract at 50c** — 3.5% of a 50c stake, paid on entry
+and *again* on exit if you stop out. It falls away toward the extremes, which is
+why cheap longshots look deceptively cheap to trade. On the control dataset,
+identical trades cost **$412 in Kalshi fees vs $116 under the Polymarket model**,
+moving ROI from −1.06% to −2.47%.
+
+**Results are not transferable between venues.** A rule tuned on Polymarket fees
+can be nonsense on Kalshi. Re-record and re-backtest after switching.
 
 ---
 
@@ -140,7 +166,18 @@ the correct behaviour**, not a bug.
 pip install -r requirements.txt
 ```
 
-### Step 0 — Sanity check the harness (no network needed)
+### Step 0 — Check the venue connection
+
+```bash
+python -m btcbot verify-venue
+```
+
+Confirms connectivity, prints the fee model, lists open markets, fetches a real
+orderbook, and asserts `up_bid + down_ask = 1.00` so a broken ask derivation
+cannot pass silently. Places no orders. Credentials are optional here — Kalshi
+market data is public, so `record` and `paper` need no API key at all.
+
+### Step 0b — Sanity check the harness (no network needed)
 
 ```bash
 python -m btcbot simulate --data-dir data-sim --windows 800
@@ -300,7 +337,28 @@ you can afford to lose.
 
 There are two execution backends. Pick one with `execution.backend`.
 
-#### Option A — Bullpen CLI (`backend: bullpen`)
+#### Option A — Kalshi (`backend: venue`, `venue: kalshi`)
+
+```bash
+pip install cryptography          # RSA-PSS request signing
+cp .env.example .env              # KALSHI_API_KEY_ID + KALSHI_PRIVATE_KEY_PATH
+```
+
+Create an API key in Kalshi account settings; it gives you a key ID and
+downloads an RSA private key. Orders are signed per request:
+`timestamp_ms + METHOD + path` (path **without** the query string), signed
+RSA-PSS/SHA256, sent as `KALSHI-ACCESS-*` headers. The timestamp is
+**milliseconds** — seconds is the most common cause of signature rejection.
+
+Orders go out as immediate-or-cancel: we price against the book we just read,
+and a resting remainder in a window that expires in minutes is a liability.
+
+```bash
+export BTCBOT_I_UNDERSTAND_REAL_MONEY=yes
+python -m btcbot live
+```
+
+#### Option B — Bullpen CLI (`backend: bullpen`, Polymarket only)
 
 Shells out to the [Bullpen CLI](https://cli.bullpen.fi/), which handles auth,
 signing and funding itself. Nothing wallet-related is needed in this repo.
@@ -331,7 +389,7 @@ Fix `execution.bullpen.buy_template` until it passes, then flip
 `execution.bullpen.dry_run: false`. While `dry_run` is true the command is
 logged and never executed.
 
-#### Option B — direct CLOB signing (`backend: clob`)
+#### Option C — Polymarket direct CLOB signing (`backend: clob`)
 
 ```bash
 pip install py-clob-client
@@ -355,10 +413,14 @@ python -m btcbot live
 
 Be aware of these before running unattended:
 
-- **Neither live backend has been executed against the real venue.** The network
-  policy where this was built blocks Polymarket and Bullpen entirely. The logic
-  is tested against fakes; the wire format is not confirmed. Place one
-  minimum-size order by hand and confirm it in the Polymarket UI first.
+- **No live backend has been executed against a real venue.** The network policy
+  where this was built blocks Kalshi, Polymarket and Bullpen entirely. Request
+  shapes follow published documentation and are tested against fakes; the wire
+  format is not confirmed. Place one minimum-size order by hand and confirm it
+  in the web UI first.
+- **The Kalshi settlement source is unconfirmed.** Which BTC index KXBTC15M
+  resolves against, and at exactly what instant, was not verifiable from here.
+  Confirm it before trusting any model-based signal — see the spot.py warning.
 - **Settlement is inferred, not confirmed.** `runner.py` settles an expired
   position from the last mark it saw (which converges to 0 or 1 as a window
   closes) rather than asking the venue what happened. It logs `APPROXIMATE` on
@@ -376,8 +438,11 @@ Be aware of these before running unattended:
 | File | Role |
 |---|---|
 | `btcbot/models.py` | Core types: `Market`, `Book`, `Snapshot`, `Order`, `Fill` |
-| `btcbot/markets.py` | Gamma API discovery, strike parsing |
-| `btcbot/clob.py` | Order book reads, live order submission |
+| `btcbot/venues/kalshi.py` | Kalshi REST, RSA auth, bid-only book handling |
+| `btcbot/venues/polymarket.py` | Polymarket adapter (Gamma + CLOB) |
+| `btcbot/fees.py` | Venue fee models (Kalshi formula vs Polymarket bps) |
+| `btcbot/markets.py` | Polymarket Gamma discovery, strike parsing |
+| `btcbot/clob.py` | Polymarket order book reads, order submission |
 | `btcbot/spot.py` | BTC spot feed (**see the oracle warning above**) |
 | `btcbot/signals.py` | Fair-value model, book imbalance, implied probability |
 | `btcbot/strategies/` | `volume_threshold` (the video's rule), `edge_threshold` |
@@ -398,7 +463,7 @@ book-depth check, an hourly trade cap, and a daily loss limit.
 ## Tests
 
 ```bash
-python -m pytest tests/ -q     # 97 passing
+python -m pytest tests/ -q     # 127 passing
 ```
 
 ---

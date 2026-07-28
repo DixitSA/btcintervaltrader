@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from .config import FeeConfig, MarketsConfig, RiskConfig
+from .fees import build_fee_model
 from .models import Order, Snapshot
 from .strategies.base import Signal
 
@@ -40,10 +41,18 @@ def kelly_fraction(prob: float, price: float) -> float:
 
 
 class RiskManager:
-    def __init__(self, risk: RiskConfig, fees: FeeConfig, markets: MarketsConfig):
+    def __init__(
+        self,
+        risk: RiskConfig,
+        fees: FeeConfig,
+        markets: MarketsConfig,
+        fee_model=None,
+        venue: str = "polymarket",
+    ):
         self.cfg = risk
         self.fees = fees
         self.markets = markets
+        self.fee_model = fee_model or build_fee_model(venue, fees)
         self.state = RiskState(bankroll=risk.bankroll_usd)
 
     # -- gates ---------------------------------------------------------
@@ -116,12 +125,16 @@ class RiskManager:
         if entry < self.cfg.min_entry_price:
             return None, f"entry {entry:.3f} below min_entry_price"
 
-        # Edge must survive fees. Fee on winnings applies to profit only.
+        # Edge must survive fees. The fee model is venue-specific: Polymarket
+        # charges on profit at settlement, Kalshi charges up front per fill.
         gross_edge = signal.prob - entry
-        expected_profit = signal.prob * (1.0 - entry)
-        fee_drag = expected_profit * (self.fees.winnings_fee_bps / 10_000.0)
-        fee_drag += entry * (self.fees.taker_fee_bps / 10_000.0)
-        net_edge = gross_edge - fee_drag
+
+        # Estimate the per-share fee at a realistic order size. Kalshi rounds
+        # each fee up to the next cent, so pricing it off a single contract
+        # would wildly overstate the drag on a normal-sized order.
+        nominal_shares = max(1.0, self.cfg.max_stake_per_trade_usd / max(entry, 0.01))
+        fee_per_share = self.fee_model.round_trip_cost(nominal_shares, entry) / nominal_shares
+        net_edge = gross_edge - fee_per_share
 
         if net_edge <= 0:
             return None, (
@@ -166,6 +179,17 @@ class RiskManager:
         depth_usd = sum(lv.price * lv.size for lv in book.asks)
         if depth_usd < self.markets.min_book_depth_usd:
             return None, f"book depth ${depth_usd:.0f} too thin"
+
+        # Re-check the edge against the ACTUAL size and sweep price, now that
+        # both are known. The first pass used an estimate; this one is exact,
+        # including Kalshi's per-fill rounding.
+        actual_fee = self.fee_model.round_trip_cost(shares, avg_fill)
+        net_pnl = shares * (signal.prob - avg_fill) - actual_fee
+        if net_pnl <= 0:
+            return None, (
+                f"no edge at actual size (edge ${shares * (signal.prob - avg_fill):+.2f} "
+                f"vs fees ${actual_fee:.2f})"
+            )
 
         return (
             Order(

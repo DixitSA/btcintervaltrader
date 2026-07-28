@@ -172,6 +172,7 @@ class Portfolio:
         winning_side: Optional[str],
         ts: float,
         winnings_fee_bps: float = 0.0,
+        fee_model=None,
     ) -> ClosedTrade:
         """Resolve at expiry: winning shares pay $1, losing shares pay $0."""
         pos = self.positions[slug]
@@ -182,15 +183,22 @@ class Portfolio:
                 slug, pos.entry_price, ts, EXIT_VOID, fee=0.0, outcome=None
             )
 
-        if winning_side == pos.side:
+        won = winning_side == pos.side
+        if won:
             gross = pos.shares
-            profit = max(0.0, gross - pos.shares * pos.entry_price)
-            fee = profit * (winnings_fee_bps / 10_000.0)
             exit_price = 1.0
         else:
             gross = 0.0
-            fee = 0.0
             exit_price = 0.0
+
+        if fee_model is not None:
+            # Venue-specific: Kalshi charges at trade time so this is zero;
+            # Polymarket takes a cut of profit here.
+            fee = fee_model.settlement_fee(pos.shares, pos.entry_price, won)
+        elif won:
+            fee = max(0.0, gross - pos.shares * pos.entry_price) * (winnings_fee_bps / 10_000.0)
+        else:
+            fee = 0.0
 
         pos_obj = self.positions.pop(slug)
         self.cash += gross - fee

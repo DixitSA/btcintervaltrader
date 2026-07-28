@@ -39,10 +39,17 @@ class RiskConfig:
 @dataclass
 class FeeConfig:
     """Fees are venue policy and change. Verify against live fills before
-    trusting any backtest produced with these numbers."""
+    trusting any backtest produced with these numbers.
+
+    Polymarket fields are the *_bps pair. Kalshi uses its published taker
+    formula instead -- ceil(0.07 * C * P * (1-P)) charged on every fill, which
+    peaks at 1.75c per contract at 50c. See fees.py.
+    """
 
     taker_fee_bps: float = 0.0
     winnings_fee_bps: float = 200.0
+    kalshi_taker_coefficient: float = 0.07
+    kalshi_maker_coefficient: float = 0.0
     # Modelled slippage beyond the quoted book, in cents of probability.
     slippage: float = 0.005
 
@@ -53,7 +60,8 @@ class MarketsConfig:
     # Polymarket runs 5m/15m/1h windows across several assets, so this is the
     # honest way to raise throughput -- unlike shortening the hold, it does not
     # change what you are betting on.
-    slug_prefixes: list[str] = field(default_factory=lambda: ["btc-updown-15m"])
+    # Kalshi: series tickers (KXBTC15M). Polymarket: slug prefixes.
+    slug_prefixes: list[str] = field(default_factory=lambda: ["KXBTC15M"])
     window_seconds: int = 900
     # Ignore a window until it has at least this much time left; and stop
     # entering once it has less than min_seconds_remaining.
@@ -156,12 +164,14 @@ class StrategyConfig:
 @dataclass
 class Config:
     mode: str = "paper"  # paper | live
+    venue: str = "kalshi"  # kalshi | polymarket
     risk: RiskConfig = field(default_factory=RiskConfig)
     fees: FeeConfig = field(default_factory=FeeConfig)
     markets: MarketsConfig = field(default_factory=MarketsConfig)
     execution: ExecutionConfig = field(default_factory=ExecutionConfig)
     exits: ExitsConfig = field(default_factory=ExitsConfig)
     strategy: StrategyConfig = field(default_factory=StrategyConfig)
+    kalshi_url: str = "https://api.elections.kalshi.com/trade-api/v2"
     gamma_url: str = "https://gamma-api.polymarket.com"
     clob_url: str = "https://clob.polymarket.com"
     spot_url: str = "https://api.binance.com"

@@ -9,17 +9,17 @@ import logging
 import time
 from typing import Optional
 
-from .clob import ClobClient
 from .config import Config
 from .execution import build_executor
-from .markets import GammaClient
 from .exits import DrawdownGuard, ExitPolicy
+from .fees import build_fee_model
 from .models import Market, Order, Snapshot
 from .portfolio import Portfolio, mark_for
 from .recorder import SnapshotWriter
 from .risk import RiskManager
 from .spot import SpotFeed
 from .strategies.base import Strategy
+from .venues import build_venue
 
 log = logging.getLogger(__name__)
 
@@ -31,18 +31,21 @@ class Runner:
         strategy: Optional[Strategy] = None,
         record: bool = True,
         trade: bool = False,
+        venue=None,
     ):
         self.cfg = cfg
         self.strategy = strategy
         self.record = record
         self.trade = trade
 
-        self.gamma = GammaClient(cfg.gamma_url)
-        self.clob = ClobClient(cfg.clob_url)
+        self.venue = venue if venue is not None else build_venue(cfg)
         self.spot = SpotFeed(cfg.spot_url)
         self.writer = SnapshotWriter(cfg.data_dir) if record else None
-        self.risk = RiskManager(cfg.risk, cfg.fees, cfg.markets)
-        self.executor = build_executor(cfg) if trade else None
+        self.fee_model = build_fee_model(cfg.venue, cfg.fees)
+        self.risk = RiskManager(
+            cfg.risk, cfg.fees, cfg.markets, fee_model=self.fee_model
+        )
+        self.executor = build_executor(cfg, venue=self.venue) if trade else None
 
         self.portfolio = Portfolio(cfg.risk.bankroll_usd)
         self.exit_policy = ExitPolicy(cfg.exits)
@@ -55,8 +58,7 @@ class Runner:
         self._window_end: dict[str, float] = {}
 
     def close(self) -> None:
-        self.gamma.close()
-        self.clob.close()
+        self.venue.close()
         self.spot.close()
         if self.writer:
             self.writer.close()
@@ -66,7 +68,7 @@ class Runner:
         if now - cached_at < 20.0 and cached:
             return cached
         try:
-            markets = self.gamma.fetch_open_markets(self.cfg.markets.slug_prefixes)
+            markets = self.venue.discover_markets(self.cfg.markets.slug_prefixes)
         except Exception as exc:  # noqa: BLE001 - a discovery blip must not kill the loop
             log.warning("market discovery failed: %s", exc)
             return cached
@@ -75,15 +77,13 @@ class Runner:
 
     def _snapshot(self, market: Market, spot_px: Optional[float], now: float) -> Optional[Snapshot]:
         try:
-            books = self.clob.get_books([market.up_token_id, market.down_token_id])
+            books = self.venue.get_books(market)
         except Exception as exc:  # noqa: BLE001
             log.warning("book fetch failed for %s: %s", market.slug, exc)
             return None
-
-        up_book = books.get(market.up_token_id)
-        down_book = books.get(market.down_token_id)
-        if up_book is None or down_book is None:
+        if books is None:
             return None
+        up_book, down_book = books
 
         return Snapshot(
             ts=now,
@@ -153,7 +153,7 @@ class Runner:
             mark = pos.last_mark if pos.last_mark is not None else pos.entry_price
             outcome = pos.side if mark >= 0.5 else None
             trade = self.portfolio.settle(
-                slug, outcome, now, self.cfg.fees.winnings_fee_bps
+                slug, outcome, now, fee_model=self.fee_model
             )
             self.risk.on_settlement(trade.pnl)
             log.info(

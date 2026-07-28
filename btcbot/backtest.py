@@ -18,6 +18,7 @@ from typing import Iterable, Optional
 
 from .config import Config
 from .execution import PaperExecutor
+from .fees import build_fee_model
 from .exits import DrawdownGuard, ExitPolicy
 from .models import DOWN, UP, Fill, Order, Snapshot
 from .portfolio import EXIT_EXPIRY, Portfolio, mark_for
@@ -277,8 +278,9 @@ def run_backtest(
     with and without stops to measure what they actually cost or saved.
     """
     windows = group_windows(snapshots)
-    risk = RiskManager(cfg.risk, cfg.fees, cfg.markets)
-    executor = PaperExecutor(cfg)
+    fee_model = build_fee_model(cfg.venue, cfg.fees)
+    risk = RiskManager(cfg.risk, cfg.fees, cfg.markets, fee_model=fee_model)
+    executor = PaperExecutor(cfg, fee_model=fee_model)
     portfolio = Portfolio(cfg.risk.bankroll_usd)
 
     exits_cfg = replace(cfg.exits, enabled=use_exits) if use_exits is not None else cfg.exits
@@ -360,7 +362,7 @@ def run_backtest(
             # Window is closing and we still hold: settle at the outcome.
             if snap.ts >= final_ts[slug] and portfolio.has_position(slug):
                 trade = portfolio.settle(
-                    slug, outcomes.get(slug), snap.ts, cfg.fees.winnings_fee_bps
+                    slug, outcomes.get(slug), snap.ts, fee_model=fee_model
                 )
                 risk.on_settlement(trade.pnl)
                 record(slug)
@@ -406,7 +408,7 @@ def run_backtest(
     # Anything still open (dataset ended mid-window) settles at its outcome.
     for slug in list(portfolio.positions):
         trade = portfolio.settle(
-            slug, outcomes.get(slug), final_ts[slug], cfg.fees.winnings_fee_bps
+            slug, outcomes.get(slug), final_ts[slug], fee_model=fee_model
         )
         risk.on_settlement(trade.pnl)
         record(slug)

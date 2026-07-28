@@ -201,6 +201,94 @@ def cmd_simulate(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_verify_venue(args: argparse.Namespace) -> int:
+    """Check venue connectivity, credentials and market discovery.
+
+    Places no orders. Run this before anything else after switching venues.
+    """
+    from .fees import build_fee_model
+    from .venues import build_venue
+
+    cfg = load_config(args.config)
+    print(f"venue                 : {cfg.venue}")
+    print(f"series / prefixes     : {', '.join(cfg.markets.slug_prefixes)}")
+
+    fee_model = build_fee_model(cfg.venue, cfg.fees)
+    print(f"fee model             : {fee_model.name}")
+    print(
+        f"  100 contracts @ 0.50: ${fee_model.entry_fee(100, 0.50):.2f} entry "
+        f"({fee_model.entry_fee(100, 0.50) / 50.0:.2%} of stake)"
+    )
+
+    try:
+        venue = build_venue(cfg)
+    except RuntimeError as exc:
+        print(f"\nFAIL: {exc}", file=sys.stderr)
+        return 1
+
+    if cfg.venue == "kalshi":
+        authed = getattr(venue, "auth", None) is not None
+        print(
+            f"credentials           : {'loaded' if authed else 'NOT SET'}"
+            f"{'' if authed else '  (fine for record/paper; required to trade)'}"
+        )
+
+    try:
+        markets = venue.discover_markets(cfg.markets.slug_prefixes)
+    except Exception as exc:  # noqa: BLE001
+        print(f"\nFAIL: market discovery failed: {exc}", file=sys.stderr)
+        venue.close()
+        return 1
+
+    if not markets:
+        print(
+            "\nNo open markets found. Check the series tickers in "
+            "markets.slug_prefixes against the venue.",
+            file=sys.stderr,
+        )
+        venue.close()
+        return 1
+
+    print(f"\nopen markets found    : {len(markets)}")
+    for market in markets[:5]:
+        strike = f"${market.strike:,.2f}" if market.strike else "UNPARSED"
+        print(f"  {market.slug:<32} strike {strike}")
+
+    probe = markets[0]
+    books = None
+    try:
+        books = venue.get_books(probe)
+    except Exception as exc:  # noqa: BLE001
+        print(f"\nFAIL: orderbook fetch failed: {exc}", file=sys.stderr)
+
+    if books:
+        up, down = books
+        print(f"\norderbook for {probe.slug}:")
+        print(f"  UP   bid {up.best_bid}  ask {up.best_ask}")
+        print(f"  DOWN bid {down.best_bid}  ask {down.best_ask}")
+        if up.best_bid is not None and down.best_ask is not None:
+            total = up.best_bid + down.best_ask
+            ok = abs(total - 1.0) < 1e-6
+            print(
+                f"  sanity: up_bid + down_ask = {total:.3f} "
+                f"{'OK' if ok else 'WRONG -- ask derivation is broken'}"
+            )
+            if not ok:
+                venue.close()
+                return 1
+
+    if any(m.strike is None for m in markets[:5]):
+        print(
+            "\nWARNING: some strikes could not be parsed. Model-based strategies "
+            "skip those markets rather than guess.",
+            file=sys.stderr,
+        )
+
+    venue.close()
+    print("\nok. Next: `python -m btcbot record` to start collecting data.")
+    return 0
+
+
 def cmd_verify_bullpen(args: argparse.Namespace) -> int:
     """Check the configured Bullpen invocation without placing an order."""
     import shutil
@@ -351,6 +439,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_sw.add_argument("--assumed-edge", type=float, default=0.03)
     p_sw.set_defaults(func=cmd_sweep)
+
+    p_vv = sub.add_parser(
+        "verify-venue", help="check venue connectivity and discovery (places no orders)"
+    )
+    p_vv.set_defaults(func=cmd_verify_venue)
 
     p_vb = sub.add_parser(
         "verify-bullpen", help="check the configured Bullpen CLI invocation (places no order)"

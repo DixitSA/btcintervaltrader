@@ -15,6 +15,7 @@ import time
 from typing import Optional, Protocol
 
 from .config import Config, require_live_confirmation
+from .fees import build_fee_model
 from .models import Fill, Order, Snapshot
 
 log = logging.getLogger(__name__)
@@ -29,8 +30,9 @@ class Executor(Protocol):
 class PaperExecutor:
     """Simulates a fill by walking the recorded ask side of the book."""
 
-    def __init__(self, cfg: Config):
+    def __init__(self, cfg: Config, fee_model=None):
         self.cfg = cfg
+        self.fee_model = fee_model or build_fee_model(cfg.venue, cfg.fees)
         self.fills: list[Fill] = []
 
     def buy(self, snap: Snapshot, order: Order) -> Optional[Fill]:
@@ -48,7 +50,7 @@ class PaperExecutor:
             log.debug("paper: fill %.4f worse than limit %.4f, no trade", price, order.limit_price)
             return None
 
-        fee = order.shares * price * (self.cfg.fees.taker_fee_bps / 10_000.0)
+        fee = self.fee_model.entry_fee(order.shares, price)
         fill = Fill(
             ts=snap.ts,
             market_slug=snap.market.slug,
@@ -75,7 +77,7 @@ class PaperExecutor:
             )
             return None
 
-        fee = order.shares * price * (self.cfg.fees.taker_fee_bps / 10_000.0)
+        fee = self.fee_model.exit_fee(order.shares, price)
         fill = Fill(
             ts=snap.ts,
             market_slug=snap.market.slug,
@@ -89,7 +91,13 @@ class PaperExecutor:
 
 
 class LiveExecutor:
-    def __init__(self, cfg: Config):
+    """Places real orders through whichever venue is configured.
+
+    UNVERIFIED against a real venue from this repo -- place one minimum-size
+    order by hand and confirm it in the web UI before running unattended.
+    """
+
+    def __init__(self, cfg: Config, venue=None, fee_model=None):
         if not cfg.is_live:
             raise RuntimeError("LiveExecutor requires mode: live")
         if not require_live_confirmation():
@@ -98,10 +106,15 @@ class LiveExecutor:
                 "Do this only after a paper run over a real dataset showed a positive "
                 "net edge on a meaningful sample."
             )
-        from .clob import LiveOrderClient
+
+        if venue is None:
+            from .venues import build_venue
+
+            venue = build_venue(cfg)
 
         self.cfg = cfg
-        self.client = LiveOrderClient(host=cfg.clob_url)
+        self.venue = venue
+        self.fee_model = fee_model or build_fee_model(cfg.venue, cfg.fees)
         self.fills: list[Fill] = []
 
     def buy(self, snap: Snapshot, order: Order) -> Optional[Fill]:
@@ -110,10 +123,22 @@ class LiveExecutor:
     def sell(self, snap: Snapshot, order: Order) -> Optional[Fill]:
         return self._submit(snap, order, selling=True)
 
+    @staticmethod
+    def _extract(resp: dict, *names: str) -> Optional[float]:
+        for name in names:
+            value = resp.get(name)
+            if isinstance(value, (int, float)):
+                return float(value)
+            if isinstance(value, str):
+                try:
+                    return float(value)
+                except ValueError:
+                    continue
+        return None
+
     def _submit(self, snap: Snapshot, order: Order, selling: bool) -> Optional[Fill]:
-        token_id = snap.market.token_id(order.side)
         try:
-            resp = self.client.submit(token_id, order, selling=selling)
+            resp = self.venue.place_order(snap.market, order, selling=selling)
         except Exception as exc:  # noqa: BLE001 - never let a venue error kill the loop
             log.error("live order failed: %s", exc)
             return None
@@ -122,25 +147,38 @@ class LiveExecutor:
             log.error("live order rejected: %s", resp)
             return None
 
-        # The venue is the source of truth for the actual fill price; fall back
-        # to the limit only when it does not tell us.
-        price = float(resp.get("price") or order.limit_price)
-        shares = float(resp.get("size") or order.shares)
+        # Kalshi nests the order under "order"; unwrap before reading fills.
+        payload = resp.get("order") if isinstance(resp.get("order"), dict) else resp
+
+        price = self._extract(payload, "price", "yes_price", "no_price", "avgPrice")
+        if price is not None and price > 1.0:
+            price = price / 100.0  # Kalshi reports cents
+        shares = self._extract(payload, "count", "filled_count", "size", "taker_fill_count")
+
+        price = price if price is not None else order.limit_price
+        shares = shares if shares is not None else order.shares
+
+        fee = (
+            self.fee_model.exit_fee(shares, price)
+            if selling
+            else self.fee_model.entry_fee(shares, price)
+        )
         fill = Fill(
             ts=time.time(),
             market_slug=snap.market.slug,
             side=order.side,
             shares=shares,
             price=price,
-            fee=shares * price * (self.cfg.fees.taker_fee_bps / 10_000.0),
+            fee=fee,
         )
         self.fills.append(fill)
         log.info(
-            "LIVE %s fill: %s %.2f @ %.3f",
+            "LIVE %s fill: %s %.2f @ %.3f (fee $%.2f)",
             "sell" if selling else "buy",
             order.side,
             shares,
             price,
+            fee,
         )
         return fill
 
@@ -289,7 +327,7 @@ class BullpenExecutor:
         )
 
 
-def build_executor(cfg: Config) -> Executor:
+def build_executor(cfg: Config, venue=None) -> Executor:
     backend = cfg.execution.backend
 
     if backend == "paper":
@@ -309,6 +347,6 @@ def build_executor(cfg: Config) -> Executor:
 
     if backend == "bullpen":
         return BullpenExecutor(cfg)
-    if backend == "clob":
-        return LiveExecutor(cfg)
+    if backend in ("clob", "venue", "kalshi"):
+        return LiveExecutor(cfg, venue=venue)
     raise RuntimeError(f"unknown execution backend: {backend}")
