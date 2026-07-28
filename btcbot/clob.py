@@ -141,15 +141,15 @@ class LiveOrderClient:
         self.funder = funder
         log.info("live order client ready (signature_type=%s, funder=%s)", sig_type, funder)
 
-    def submit(self, token_id: str, order: Order) -> dict[str, Any]:
+    def submit(self, token_id: str, order: Order, selling: bool = False) -> dict[str, Any]:
         from py_clob_client.clob_types import OrderArgs, OrderType  # type: ignore
-        from py_clob_client.order_builder.constants import BUY  # type: ignore
+        from py_clob_client.order_builder.constants import BUY, SELL  # type: ignore
 
         args = OrderArgs(
             token_id=token_id,
             price=round(order.limit_price, 3),
             size=round(order.shares, 2),
-            side=BUY,
+            side=SELL if selling else BUY,
         )
         signed = self._client.create_order(args)
         # Fill-and-kill: we priced this against the book we just read, so any

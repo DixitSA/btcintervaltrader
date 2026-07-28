@@ -56,9 +56,81 @@ def cmd_backtest(args: argparse.Namespace) -> int:
         params[key] = _coerce(value)
 
     strategy = build_strategy(name, params)
-    report = run_backtest(snapshots, strategy, cfg)
+    use_exits = None
+    if args.no_exits:
+        use_exits = False
+    elif args.exits:
+        use_exits = True
+
+    report = run_backtest(snapshots, strategy, cfg, use_exits=use_exits)
     print(f"\nstrategy: {strategy.describe()}")
     print(report.render())
+    if report.portfolio is not None and report.n:
+        print(report.portfolio.render())
+    return 0
+
+
+def cmd_compare_exits(args: argparse.Namespace) -> int:
+    """Run the same strategy with and without stops, side by side.
+
+    A stop loss in a binary market is not free protection -- you cross the
+    spread twice. This is the command that tells you what yours actually costs.
+    """
+    cfg = load_config(args.config)
+    data_dir = args.data_dir or cfg.data_dir
+    snapshots = load_dataset(data_dir)
+    if not snapshots:
+        print(f"No recorded snapshots in '{data_dir}'. Run `record` first.", file=sys.stderr)
+        return 1
+
+    name = args.strategy or cfg.strategy.name
+    # Only carry the configured params when they belong to the strategy being
+    # run -- otherwise volume_threshold's settings leak into edge_threshold.
+    params = cfg.strategy.params if name == cfg.strategy.name else {}
+    strategy = build_strategy(name, params)
+
+    rows = []
+    for label, use_exits in (("no stops", False), ("with stops", True)):
+        rep = run_backtest(snapshots, strategy, cfg, use_exits=use_exits)
+        rows.append((label, rep))
+
+    print(f"\nstrategy: {strategy.describe()}")
+    print(f"stop_loss_drop={cfg.exits.stop_loss_drop} "
+          f"take_profit_rise={cfg.exits.take_profit_rise} "
+          f"trailing_stop_drop={cfg.exits.trailing_stop_drop}")
+    print(f"\n{'':<12}{'trades':>8}{'profit%':>9}{'ROI':>10}{'P&L':>12}{'maxDD':>10}{'t':>8}")
+    print("-" * 69)
+    for label, rep in rows:
+        f = lambda v, fmt: (format(v, fmt) if v is not None else "-")
+        dd = rep.portfolio.max_drawdown if rep.portfolio else rep.max_drawdown
+        print(
+            f"{label:<12}{rep.n:>8}{f(rep.win_rate, '.1%'):>9}{f(rep.roi, '+.2%'):>10}"
+            f"{rep.total_pnl:>+12,.2f}{dd:>10,.2f}{f(rep.roi_t_stat, '+.2f'):>8}"
+        )
+
+    without, with_stops = rows[0][1], rows[1][1]
+    if not with_stops.n and not without.n:
+        print("\nNo trades in either run, so there is nothing to compare.")
+        return 0
+
+    delta = with_stops.total_pnl - without.total_pnl
+    if abs(delta) < 0.005:
+        verdict = "No measurable difference on this sample."
+    elif delta < 0:
+        verdict = "They cost money here."
+    else:
+        verdict = "They helped here."
+    print(
+        f"\nStops changed P&L by ${delta:+,.2f} on this sample.\n{verdict} "
+        "Judge with the t column, not P&L alone -- one sample is not proof."
+    )
+    if with_stops.exits:
+        print("\nExit breakdown (with stops):")
+        pnl_by = {}
+        for t in with_stops.trades:
+            pnl_by[t.exit_reason] = pnl_by.get(t.exit_reason, 0.0) + t.pnl
+        for reason in sorted(with_stops.exits, key=lambda r: -with_stops.exits[r]):
+            print(f"  {reason:<16}{with_stops.exits[reason]:>6}  ${pnl_by.get(reason, 0.0):+,.2f}")
     return 0
 
 
@@ -256,7 +328,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_bt.add_argument("--data-dir", default=None)
     p_bt.add_argument("--strategy", choices=sorted(REGISTRY), default=None)
     p_bt.add_argument("--set", action="append", metavar="KEY=VALUE")
+    p_bt.add_argument("--no-exits", action="store_true", help="hold every position to expiry")
+    p_bt.add_argument("--exits", action="store_true", help="force stops on")
     p_bt.set_defaults(func=cmd_backtest)
+
+    p_ce = sub.add_parser("compare-exits", help="same strategy with and without stops")
+    p_ce.add_argument("--data-dir", default=None)
+    p_ce.add_argument("--strategy", choices=sorted(REGISTRY), default=None)
+    p_ce.set_defaults(func=cmd_compare_exits)
 
     p_sw = sub.add_parser("sweep", help="test the volume rule in every direction")
     p_sw.add_argument("--data-dir", default=None)

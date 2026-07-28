@@ -13,7 +13,9 @@ from .clob import ClobClient
 from .config import Config
 from .execution import build_executor
 from .markets import GammaClient
-from .models import Fill, Market, Snapshot
+from .exits import DrawdownGuard, ExitPolicy
+from .models import Market, Order, Snapshot
+from .portfolio import Portfolio, mark_for
 from .recorder import SnapshotWriter
 from .risk import RiskManager
 from .spot import SpotFeed
@@ -42,8 +44,10 @@ class Runner:
         self.risk = RiskManager(cfg.risk, cfg.fees, cfg.markets)
         self.executor = build_executor(cfg) if trade else None
 
-        # slug -> fill, for windows we are holding to expiry.
-        self.open_fills: dict[str, Fill] = {}
+        self.portfolio = Portfolio(cfg.risk.bankroll_usd)
+        self.exit_policy = ExitPolicy(cfg.exits)
+        self.guard = DrawdownGuard(cfg.exits.max_drawdown_usd, cfg.exits.max_drawdown_pct)
+
         self._traded_windows: set[str] = set()
         self._market_cache: tuple[float, list[Market]] = (0.0, [])
 
@@ -87,15 +91,74 @@ class Runner:
             window_volume=market.volume,
         )
 
+    def _manage_position(self, snap: Snapshot) -> None:
+        """Mark an open position and run the exit policy against it."""
+        slug = snap.market.slug
+        pos = self.portfolio.positions.get(slug)
+        if pos is None:
+            return
+
+        mark = mark_for(snap, pos.side)
+        if mark is not None:
+            self.portfolio.update_mark(slug, mark)
+
+        decision = self.exit_policy.evaluate(
+            pos, mark, snap.ts, snap.market.seconds_remaining(snap.ts)
+        )
+        if not decision.should_exit:
+            return
+        if self.executor is None:
+            return
+
+        fill = self.executor.sell(
+            snap,
+            Order(side=pos.side, shares=pos.shares, limit_price=0.0, reason=decision.detail),
+        )
+        if fill is None:
+            log.warning("%s: %s triggered but exit did not fill", slug, decision.reason)
+            return
+
+        trade = self.portfolio.close(
+            slug, fill.price, snap.ts, decision.reason, fee=fill.fee
+        )
+        self.risk.on_settlement(trade.pnl)
+        log.info(
+            "%s: %s at %.3f (%s) P&L $%+.2f | equity $%.2f",
+            slug,
+            decision.reason,
+            fill.price,
+            decision.detail,
+            trade.pnl,
+            self.portfolio.equity,
+        )
+
     def _settle_expired(self, now: float) -> None:
-        for slug, fill in list(self.open_fills.items()):
-            # We only know the true outcome once the venue resolves; until then
-            # release the position slot a little after expiry so the bot can
-            # keep trading, and reconcile P&L from the venue separately.
-            if now > fill.ts + self.cfg.markets.window_seconds + 60:
-                log.info("window %s expired; releasing position slot", slug)
-                self.risk.on_settlement(0.0)
-                del self.open_fills[slug]
+        """Resolve positions whose window has ended.
+
+        The venue is the authority on the outcome, and this bot does not yet
+        query it (see README, "Known gaps"). We settle from the last mark we
+        saw, which converges to 0 or 1 as a window closes, and log loudly so
+        the approximation is never silent.
+        """
+        grace = self.cfg.markets.window_seconds + 60
+        for slug, pos in list(self.portfolio.positions.items()):
+            if now <= pos.entry_ts + grace:
+                continue
+
+            mark = pos.last_mark if pos.last_mark is not None else pos.entry_price
+            outcome = pos.side if mark >= 0.5 else None
+            trade = self.portfolio.settle(
+                slug, outcome, now, self.cfg.fees.winnings_fee_bps
+            )
+            self.risk.on_settlement(trade.pnl)
+            log.info(
+                "%s: settled from last mark %.3f -> P&L $%+.2f (APPROXIMATE; "
+                "reconcile against the venue) | equity $%.2f",
+                slug,
+                mark,
+                trade.pnl,
+                self.portfolio.equity,
+            )
 
     def tick(self) -> None:
         now = time.time()
@@ -116,11 +179,21 @@ class Runner:
 
             if not (self.trade and self.strategy and self.executor):
                 continue
+
+            if self.portfolio.has_position(market.slug):
+                self._manage_position(snap)
+                continue
+
             if market.slug in self._traded_windows:
                 continue
 
             signal = self.strategy.decide(snap)
             if signal is None:
+                continue
+
+            halted = self.guard.check(self.portfolio)
+            if halted:
+                log.warning("%s: no entry, %s", market.slug, halted)
                 continue
 
             order, rejection = self.risk.evaluate(snap, signal)
@@ -132,17 +205,27 @@ class Runner:
             if fill is None:
                 continue
 
+            try:
+                self.portfolio.open(
+                    market.slug, fill.side, fill.shares, fill.price, now, fee=fill.fee
+                )
+            except ValueError as exc:
+                log.error("%s: filled but cannot book the position: %s", market.slug, exc)
+                continue
+
             self.risk.on_trade(now)
-            self.open_fills[market.slug] = fill
             self._traded_windows.add(market.slug)
             log.info(
-                "%s: bought %s %.2f @ %.3f | %s",
+                "%s: bought %s %.2f @ %.3f | %s | equity $%.2f",
                 market.slug,
                 fill.side,
                 fill.shares,
                 fill.price,
                 order.reason,
+                self.portfolio.equity,
             )
+
+        self.portfolio.record_equity(now)
 
     def run(self, max_ticks: Optional[int] = None) -> None:
         mode = "LIVE" if self.cfg.is_live and self.trade else ("paper" if self.trade else "record-only")
@@ -168,3 +251,5 @@ class Runner:
             log.info("interrupted; shutting down")
         finally:
             self.close()
+            if self.trade:
+                print("\n" + self.portfolio.render())

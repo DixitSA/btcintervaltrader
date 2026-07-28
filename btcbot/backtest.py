@@ -13,12 +13,14 @@ from __future__ import annotations
 
 import math
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Iterable, Optional
 
 from .config import Config
 from .execution import PaperExecutor
-from .models import DOWN, UP, Fill, Snapshot
+from .exits import DrawdownGuard, ExitPolicy
+from .models import DOWN, UP, Fill, Order, Snapshot
+from .portfolio import EXIT_EXPIRY, Portfolio, mark_for
 from .risk import RiskManager
 from .signals import market_implied_up
 from .strategies.base import Strategy
@@ -33,9 +35,20 @@ class WindowResult:
     outcome: Optional[str]
     pnl: float
     reason: str = ""
+    exit_reason: str = EXIT_EXPIRY
+    exit_price: float = 0.0
 
     @property
     def won(self) -> bool:
+        """Profitable, not merely "picked the right side".
+
+        A stopped-out position can hold the winning side and still lose money,
+        so P&L is the honest criterion once exits are in play.
+        """
+        return self.pnl > 0
+
+    @property
+    def picked_correctly(self) -> bool:
         return self.outcome is not None and self.outcome == self.side
 
 
@@ -45,8 +58,10 @@ class BacktestReport:
     windows_seen: int = 0
     windows_with_signal: int = 0
     rejections: dict[str, int] = field(default_factory=lambda: defaultdict(int))
+    exits: dict[str, int] = field(default_factory=lambda: defaultdict(int))
     starting_bankroll: float = 0.0
     ending_bankroll: float = 0.0
+    portfolio: Optional[Portfolio] = None
 
     @property
     def n(self) -> int:
@@ -55,6 +70,33 @@ class BacktestReport:
     @property
     def wins(self) -> int:
         return sum(1 for t in self.trades if t.won)
+
+    @property
+    def trade_returns(self) -> list[float]:
+        """Per-trade return on stake. The basis for the significance test."""
+        out = []
+        for t in self.trades:
+            stake = t.shares * t.entry_price
+            if stake > 0:
+                out.append(t.pnl / stake)
+        return out
+
+    @property
+    def roi_t_stat(self) -> Optional[float]:
+        """t-statistic of mean per-trade return against zero.
+
+        Preferred over the win-rate z-score once stops are enabled: with early
+        exits the payoff is no longer binary, so comparing a win rate to the
+        entry price stops being the right null.
+        """
+        rets = self.trade_returns
+        if len(rets) < 2:
+            return None
+        mean = sum(rets) / len(rets)
+        var = sum((r - mean) ** 2 for r in rets) / (len(rets) - 1)
+        if var <= 0:
+            return None
+        return mean / math.sqrt(var / len(rets))
 
     @property
     def win_rate(self) -> Optional[float]:
@@ -139,30 +181,49 @@ class BacktestReport:
 
         wr = self.win_rate or 0.0
         be = self.breakeven_win_rate or 0.0
+        dd = self.portfolio.max_drawdown if self.portfolio else self.max_drawdown
         lines += [
-            f"win rate              : {wr:.1%} ({self.wins}/{self.n})",
+            f"profitable trades     : {wr:.1%} ({self.wins}/{self.n})",
             f"break-even win rate   : {be:.1%}  (avg entry ${be:.3f})",
             f"total staked          : ${self.total_staked:,.2f}",
             f"total P&L             : ${self.total_pnl:,.2f}",
             f"ROI on stake          : {(self.roi or 0.0):+.2%}",
-            f"bankroll              : ${self.starting_bankroll:,.2f} -> ${self.ending_bankroll:,.2f}",
-            f"max drawdown          : ${self.max_drawdown:,.2f}",
+            f"equity                : ${self.starting_bankroll:,.2f} -> ${self.ending_bankroll:,.2f}",
+            f"max drawdown          : ${dd:,.2f}",
         ]
-        z = self.z_score
-        if z is not None:
-            lines.append(f"edge z-score          : {z:+.2f}")
-            if abs(z) < 2.0:
+
+        if self.exits:
+            lines.append("exits                 :")
+            pnl_by = {}
+            for t in self.trades:
+                pnl_by[t.exit_reason] = pnl_by.get(t.exit_reason, 0.0) + t.pnl
+            for reason in sorted(self.exits, key=lambda r: -self.exits[r]):
+                lines.append(
+                    f"  {reason:<16} {self.exits[reason]:>5}  "
+                    f"${pnl_by.get(reason, 0.0):+,.2f}"
+                )
+
+        t_stat = self.roi_t_stat
+        if t_stat is not None:
+            lines.append(f"ROI t-statistic       : {t_stat:+.2f}")
+            if abs(t_stat) < 2.0:
                 lines.append(
                     "  -> NOT statistically distinguishable from no edge. "
                     "Do not trade this live."
                 )
-            elif z > 0:
+            elif t_stat > 0:
                 lines.append(
                     "  -> Positive and significant on THIS sample. Confirm it holds "
                     "out-of-sample before believing it."
                 )
             else:
-                lines.append("  -> Significantly WORSE than break-even.")
+                lines.append("  -> Significantly LOSING.")
+
+        z = self.z_score
+        if z is not None and not self.exits.keys() - {EXIT_EXPIRY}:
+            # Only meaningful when every trade ran to expiry (binary payoff).
+            lines.append(f"win-rate z-score      : {z:+.2f}")
+
         if self.n < 100:
             lines.append(
                 f"  note: {self.n} trades is a small sample for a near-coin-flip market."
@@ -208,12 +269,24 @@ def run_backtest(
     strategy: Strategy,
     cfg: Config,
     one_trade_per_window: bool = True,
+    use_exits: Optional[bool] = None,
 ) -> BacktestReport:
+    """Replay windows through strategy -> risk -> execution -> portfolio.
+
+    `use_exits` overrides cfg.exits.enabled, so the same dataset can be run
+    with and without stops to measure what they actually cost or saved.
+    """
     windows = group_windows(snapshots)
     risk = RiskManager(cfg.risk, cfg.fees, cfg.markets)
     executor = PaperExecutor(cfg)
+    portfolio = Portfolio(cfg.risk.bankroll_usd)
 
-    report = BacktestReport(starting_bankroll=risk.state.bankroll)
+    exits_cfg = replace(cfg.exits, enabled=use_exits) if use_exits is not None else cfg.exits
+    exit_policy = ExitPolicy(exits_cfg)
+    guard = DrawdownGuard(exits_cfg.max_drawdown_usd, exits_cfg.max_drawdown_pct)
+
+    report = BacktestReport(starting_bankroll=portfolio.starting_cash)
+    report.portfolio = portfolio
 
     for slug in sorted(windows, key=lambda s: windows[s][0].ts):
         window = windows[slug]
@@ -221,14 +294,58 @@ def run_backtest(
         outcome = infer_outcome(window)
 
         signalled = False
-        fill: Optional[Fill] = None
+        entry_fill: Optional[Fill] = None
         reason_text = ""
+        closed_early = False
 
         for snap in window:
+            # -- manage an open position first -------------------------
+            if portfolio.has_position(slug):
+                pos = portfolio.positions[slug]
+                mark = mark_for(snap, pos.side)
+                if mark is not None:
+                    portfolio.update_mark(slug, mark)
+
+                decision = exit_policy.evaluate(
+                    pos, mark, snap.ts, snap.market.seconds_remaining(snap.ts)
+                )
+                if decision.should_exit:
+                    exit_order = Order(
+                        side=pos.side,
+                        shares=pos.shares,
+                        limit_price=0.0,  # take whatever the bid gives
+                        reason=decision.detail,
+                    )
+                    exit_fill = executor.sell(snap, exit_order)
+                    if exit_fill is not None:
+                        trade = portfolio.close(
+                            slug,
+                            exit_fill.price,
+                            snap.ts,
+                            decision.reason,
+                            fee=exit_fill.fee,
+                            outcome=outcome,
+                        )
+                        risk.on_settlement(trade.pnl)
+                        report.exits[decision.reason] += 1
+                        closed_early = True
+                        break
+                    report.rejections["exit fill failed"] += 1
+                portfolio.record_equity(snap.ts)
+                continue
+
+            # -- otherwise look for an entry ---------------------------
+            if entry_fill is not None:
+                continue
+
             signal = strategy.decide(snap)
             if signal is None:
                 continue
             signalled = True
+
+            if guard.check(portfolio):
+                report.rejections[f"halted: {guard.tripped_reason}"] += 1
+                continue
 
             order, rejection = risk.evaluate(snap, signal)
             if order is None:
@@ -241,38 +358,47 @@ def run_backtest(
                 report.rejections["paper fill failed"] += 1
                 continue
 
+            try:
+                portfolio.open(
+                    slug, fill.side, fill.shares, fill.price, snap.ts, fee=fill.fee
+                )
+            except ValueError as exc:
+                report.rejections[str(exc).split(":")[0]] += 1
+                continue
+
+            entry_fill = fill
             reason_text = order.reason
             risk.on_trade(snap.ts)
-            if one_trade_per_window:
-                break
+            portfolio.record_equity(snap.ts)
 
         if signalled:
             report.windows_with_signal += 1
 
-        if fill is None:
+        if entry_fill is None:
             continue
 
-        # Settle: winning shares pay $1, fee applies to profit only.
-        if outcome is None:
-            pnl = -fill.fee  # treat as voided stake return
-        elif outcome == fill.side:
-            profit = fill.shares * (1.0 - fill.price)
-            pnl = profit * (1.0 - cfg.fees.winnings_fee_bps / 10_000.0) - fill.fee
-        else:
-            pnl = -(fill.shares * fill.price) - fill.fee
+        if not closed_early and portfolio.has_position(slug):
+            trade = portfolio.settle(
+                slug, outcome, window[-1].ts, cfg.fees.winnings_fee_bps
+            )
+            risk.on_settlement(trade.pnl)
+            report.exits[trade.exit_reason] += 1
 
-        risk.on_settlement(pnl)
+        last = portfolio.closed[-1]
+        portfolio.record_equity(window[-1].ts)
         report.trades.append(
             WindowResult(
                 slug=slug,
-                side=fill.side,
-                shares=fill.shares,
-                entry_price=fill.price,
+                side=last.side,
+                shares=last.shares,
+                entry_price=last.entry_price,
                 outcome=outcome,
-                pnl=pnl,
+                pnl=last.pnl,
                 reason=reason_text,
+                exit_reason=last.exit_reason,
+                exit_price=last.exit_price,
             )
         )
 
-    report.ending_bankroll = risk.state.bankroll
+    report.ending_bankroll = portfolio.equity
     return report

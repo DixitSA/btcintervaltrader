@@ -39,6 +39,28 @@ risk:
   # how accounts go to zero even with a genuine edge.
   kelly_fraction: 0.25
 
+exits:
+  # Stop loss / take profit. Thresholds are in PROBABILITY POINTS, not percent:
+  # entered at 0.60 with stop_loss_drop 0.15 -> exits when the BID hits 0.45.
+  #
+  # A stop here means selling back into the book, so you cross the spread a
+  # second time. On a near-coin-flip that is a real cost -- noise stops you out
+  # of positions that would have won. Measure it before trusting it:
+  #   python -m btcbot compare-exits
+  enabled: true
+  stop_loss_drop: 0.15
+  take_profit_rise: null
+  trailing_stop_drop: null
+  max_hold_seconds: null
+  # Do not churn in the final seconds: the book widens and the outcome is
+  # nearly decided, so exiting there mostly pays the spread for nothing.
+  no_exit_within_seconds: 20.0
+  min_hold_seconds: 0.0
+  # Account-level kill switch on equity drawdown. Unlike the daily loss limit
+  # (closed trades only) this also sees open positions under water.
+  max_drawdown_usd: null
+  max_drawdown_pct: 0.25
+
 execution:
   # paper   -> simulate against the live book (safe, default)
   # bullpen -> shell out to the Bullpen CLI

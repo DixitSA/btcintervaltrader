@@ -78,25 +78,35 @@ def test_default_volume_rule_takes_no_trades(sim_snapshots):
     assert report.n == 0
 
 
+def research_config() -> Config:
+    """Config with throughput caps and kill switches relaxed, so a measurement
+    reflects the rule rather than the risk limits."""
+    cfg = Config()
+    cfg.risk.max_trades_per_hour = 10**9
+    cfg.risk.daily_loss_limit_usd = 1e12
+    cfg.risk.bankroll_usd = 100_000.0
+    cfg.exits.max_drawdown_pct = None
+    cfg.exits.max_drawdown_usd = None
+    return cfg
+
+
 @pytest.mark.parametrize("direction", ["follow", "fade", "up", "down"])
 def test_volume_rule_shows_no_edge_in_a_no_edge_world(sim_snapshots, direction):
-    """The control experiment.
+    """The control experiment, run to expiry with no stops.
 
     Volume in the simulator is drawn independently of the price path, so no
-    setting of the volume rule can have a real edge. We assert the measured
-    edge is not significant. A failure here means the backtester is leaking
-    future information.
-    """
-    cfg = Config()
-    cfg.risk.max_trades_per_hour = 10_000
-    cfg.risk.daily_loss_limit_usd = 1e9
-    cfg.risk.bankroll_usd = 100_000.0
+    setting of the volume rule can have a real edge. A failure here means the
+    backtester is leaking future information.
 
+    Exits are disabled so payoffs stay binary and the win-rate z-score is a
+    valid statistic. The exits-enabled case is covered below with the
+    t-statistic instead.
+    """
     strat = build_strategy(
         "volume_threshold",
         {"min_volume_usd": 300_000, "direction": direction, "assumed_edge": 0.05},
     )
-    report = run_backtest(sim_snapshots, strat, cfg)
+    report = run_backtest(sim_snapshots, strategy=strat, cfg=research_config(), use_exits=False)
 
     if report.n < 30:
         pytest.skip(f"only {report.n} trades for direction={direction}")
@@ -107,6 +117,64 @@ def test_volume_rule_shows_no_edge_in_a_no_edge_world(sim_snapshots, direction):
         f"direction={direction} showed z={z:+.2f} in a world with no edge by "
         "construction -- the harness is leaking information"
     )
+
+
+@pytest.mark.parametrize("direction", ["follow", "fade", "up", "down"])
+def test_no_positive_edge_with_stops_either(sim_snapshots, direction):
+    """Same control, with stops on, judged by the t-statistic.
+
+    Stops must not manufacture a positive edge out of a no-edge world. They are
+    allowed to LOSE (crossing the spread twice costs real money) -- so this only
+    asserts the absence of a significant *gain*.
+    """
+    strat = build_strategy(
+        "volume_threshold",
+        {"min_volume_usd": 300_000, "direction": direction, "assumed_edge": 0.05},
+    )
+    report = run_backtest(sim_snapshots, strategy=strat, cfg=research_config(), use_exits=True)
+
+    if report.n < 30:
+        pytest.skip(f"only {report.n} trades for direction={direction}")
+
+    t = report.roi_t_stat
+    assert t is not None
+    assert t < 2.0, (
+        f"direction={direction} showed a significant POSITIVE t={t:+.2f} with "
+        "stops in a world with no edge -- stops cannot create edge"
+    )
+
+
+def test_stops_are_actually_exercised(sim_snapshots):
+    """Guards against the stop silently never firing."""
+    strat = build_strategy(
+        "volume_threshold",
+        {"min_volume_usd": 300_000, "direction": "follow", "assumed_edge": 0.05},
+    )
+    cfg = research_config()
+    cfg.exits.stop_loss_drop = 0.10
+
+    report = run_backtest(sim_snapshots, strategy=strat, cfg=cfg, use_exits=True)
+    assert report.exits.get("stop_loss", 0) > 0
+    assert report.exits.get("expiry", 0) > 0
+
+
+def test_stops_change_the_outcome_distribution(sim_snapshots):
+    """Stops must measurably alter results, and the harness must expose both."""
+    strat = build_strategy(
+        "volume_threshold",
+        {"min_volume_usd": 300_000, "direction": "follow", "assumed_edge": 0.05},
+    )
+    cfg = research_config()
+
+    without = run_backtest(sim_snapshots, strategy=strat, cfg=cfg, use_exits=False)
+    with_stops = run_backtest(sim_snapshots, strategy=strat, cfg=cfg, use_exits=True)
+
+    assert without.n == with_stops.n
+    assert set(without.exits) == {"expiry"}
+    assert "stop_loss" in with_stops.exits
+    # Crossing the spread twice on a coin flip should not raise the share of
+    # profitable trades.
+    assert with_stops.win_rate < without.win_rate
 
 
 def test_report_metrics_are_consistent():

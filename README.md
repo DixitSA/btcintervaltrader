@@ -177,6 +177,64 @@ Read the **z** column, not the ROI column.
 python -m btcbot paper
 ```
 
+Paper mode runs the full portfolio: cash, open positions marked to the bid,
+realized vs unrealized P&L, equity curve, drawdown, and stop losses that fire
+against real books. It prints a ledger on exit.
+
+---
+
+## Stop losses, and what they actually cost
+
+Thresholds are in **probability points**, not percent. Entered at `0.60` with
+`stop_loss_drop: 0.15` exits when the **bid** hits `0.45`.
+
+```yaml
+exits:
+  enabled: true
+  stop_loss_drop: 0.15
+  take_profit_rise: null
+  trailing_stop_drop: null
+  max_hold_seconds: null
+  no_exit_within_seconds: 20.0   # don't churn as the window closes
+  max_drawdown_pct: 0.25         # equity kill switch
+```
+
+Positions are marked at the **best bid** — the price someone will actually pay
+you — not the mid. Marking at the mid overstates equity and lets a stop believe
+it exited at a price it could not get.
+
+**A stop here is not free protection.** It means selling back into the book, so
+you cross the spread twice. On a near-coin-flip, noise stops you out of
+positions that would have resolved in your favour. Measure it:
+
+```bash
+python -m btcbot compare-exits
+```
+
+On the synthetic control dataset:
+
+```
+              trades  profit%       ROI         P&L     maxDD       t
+---------------------------------------------------------------------
+no stops         421    72.0%    -1.06%     -223.92    887.00   -0.34
+with stops       421    42.5%    -1.89%     -398.89    701.26   -1.06
+
+Exit breakdown (with stops):
+  stop_loss          241  $-3,596.09
+  expiry             180  $+3,197.20
+```
+
+The stop cut max drawdown from **$887 to $701** — and cost **$175** in P&L,
+dropping profitable trades from 72% to 42.5%. That is the real trade: stops buy
+you a smaller drawdown and you pay for it in expectancy. Whether that's worth it
+is your call, but make it with this table in front of you, on your own data.
+
+> **Note on statistics:** once stops are on, payoffs are no longer binary, so
+> the win-rate z-score stops being a valid test — a stopped-out trade can hold
+> the winning side and still lose money. The report switches to a **t-statistic
+> on per-trade returns**, which is valid either way. `|t| < 2` still means no
+> demonstrable edge.
+
 ### Step 4 — Live (only if steps 2 and 3 justified it)
 
 Live requires **both** `mode: live` and `BTCBOT_I_UNDERSTAND_REAL_MONEY=yes`, so
@@ -244,11 +302,12 @@ Be aware of these before running unattended:
   policy where this was built blocks Polymarket and Bullpen entirely. The logic
   is tested against fakes; the wire format is not confirmed. Place one
   minimum-size order by hand and confirm it in the Polymarket UI first.
-- **No settlement reconciliation.** `runner.py` releases the position slot ~60s
-  after expiry and books $0 P&L, because it never asks the venue what actually
-  happened. Live bankroll tracking and the daily loss limit are therefore *not*
-  accurate — the kill switch will not fire on real losses yet. Backtest P&L is
-  exact; live P&L is not.
+- **Settlement is inferred, not confirmed.** `runner.py` settles an expired
+  position from the last mark it saw (which converges to 0 or 1 as a window
+  closes) rather than asking the venue what happened. It logs `APPROXIMATE` on
+  every such settlement. Backtest P&L is exact; live P&L is close but should be
+  reconciled against your actual account. Early exits (stop loss / take profit)
+  *are* exact, because those fills are real.
 - **No startup balance or allowance check.** Nothing verifies you hold USDC or
   that exchange allowances are set.
 - **Fee constants are placeholders** and need verifying against real fills.
@@ -266,6 +325,8 @@ Be aware of these before running unattended:
 | `btcbot/signals.py` | Fair-value model, book imbalance, implied probability |
 | `btcbot/strategies/` | `volume_threshold` (the video's rule), `edge_threshold` |
 | `btcbot/risk.py` | Sizing, fee-aware edge check, caps, kill switch |
+| `btcbot/portfolio.py` | Cash, positions, mark-to-market, P&L ledger, drawdown |
+| `btcbot/exits.py` | Stop loss, take profit, trailing stop, drawdown guard |
 | `btcbot/execution.py` | `PaperExecutor` / `BullpenExecutor` / `LiveExecutor` |
 | `btcbot/backtest.py` | Replay + statistics |
 | `btcbot/simulate.py` | Synthetic no-edge control world |
@@ -280,7 +341,7 @@ book-depth check, an hourly trade cap, and a daily loss limit.
 ## Tests
 
 ```bash
-python -m pytest tests/ -q     # 40 passing
+python -m pytest tests/ -q     # 86 passing
 ```
 
 ---

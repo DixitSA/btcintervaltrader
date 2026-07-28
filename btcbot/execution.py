@@ -23,6 +23,8 @@ log = logging.getLogger(__name__)
 class Executor(Protocol):
     def buy(self, snap: Snapshot, order: Order) -> Optional[Fill]: ...
 
+    def sell(self, snap: Snapshot, order: Order) -> Optional[Fill]: ...
+
 
 class PaperExecutor:
     """Simulates a fill by walking the recorded ask side of the book."""
@@ -58,6 +60,33 @@ class PaperExecutor:
         self.fills.append(fill)
         return fill
 
+    def sell(self, snap: Snapshot, order: Order) -> Optional[Fill]:
+        """Exit by hitting the bid side. Slippage works against us here too."""
+        book = snap.book(order.side)
+        avg = book.sweep_proceeds(order.shares)
+        if avg is None:
+            log.debug("paper: not enough bid depth to exit %.2f shares", order.shares)
+            return None
+
+        price = max(0.0, avg - self.cfg.fees.slippage)
+        if price < order.limit_price - 1e-6:
+            log.debug(
+                "paper: exit %.4f below floor %.4f, holding", price, order.limit_price
+            )
+            return None
+
+        fee = order.shares * price * (self.cfg.fees.taker_fee_bps / 10_000.0)
+        fill = Fill(
+            ts=snap.ts,
+            market_slug=snap.market.slug,
+            side=order.side,
+            shares=order.shares,
+            price=price,
+            fee=fee,
+        )
+        self.fills.append(fill)
+        return fill
+
 
 class LiveExecutor:
     def __init__(self, cfg: Config):
@@ -76,9 +105,15 @@ class LiveExecutor:
         self.fills: list[Fill] = []
 
     def buy(self, snap: Snapshot, order: Order) -> Optional[Fill]:
+        return self._submit(snap, order, selling=False)
+
+    def sell(self, snap: Snapshot, order: Order) -> Optional[Fill]:
+        return self._submit(snap, order, selling=True)
+
+    def _submit(self, snap: Snapshot, order: Order, selling: bool) -> Optional[Fill]:
         token_id = snap.market.token_id(order.side)
         try:
-            resp = self.client.submit(token_id, order)
+            resp = self.client.submit(token_id, order, selling=selling)
         except Exception as exc:  # noqa: BLE001 - never let a venue error kill the loop
             log.error("live order failed: %s", exc)
             return None
@@ -100,7 +135,13 @@ class LiveExecutor:
             fee=shares * price * (self.cfg.fees.taker_fee_bps / 10_000.0),
         )
         self.fills.append(fill)
-        log.info("LIVE fill: %s %.2f @ %.3f", order.side, shares, price)
+        log.info(
+            "LIVE %s fill: %s %.2f @ %.3f",
+            "sell" if selling else "buy",
+            order.side,
+            shares,
+            price,
+        )
         return fill
 
 
@@ -130,7 +171,8 @@ class BullpenExecutor:
                 "Install the Bullpen CLI, or set execution.bullpen.binary."
             )
 
-    def render(self, snap: Snapshot, order: Order) -> list[str]:
+    def render(self, snap: Snapshot, order: Order, selling: bool = False) -> list[str]:
+        template = self.bp.sell_template if selling else self.bp.buy_template
         values = {
             "token_id": snap.market.token_id(order.side),
             "side": order.side.lower(),
@@ -140,15 +182,22 @@ class BullpenExecutor:
             "slug": snap.market.slug,
             "condition_id": snap.market.condition_id,
         }
+        field = "sell_template" if selling else "buy_template"
         try:
-            return [part.format(**values) for part in self.bp.buy_template]
+            return [part.format(**values) for part in template]
         except KeyError as exc:
             raise RuntimeError(
-                f"unknown placeholder {exc} in execution.bullpen.buy_template"
+                f"unknown placeholder {exc} in execution.bullpen.{field}"
             ) from exc
 
     def buy(self, snap: Snapshot, order: Order) -> Optional[Fill]:
-        argv = self.render(snap, order)
+        return self._execute(snap, order, selling=False)
+
+    def sell(self, snap: Snapshot, order: Order) -> Optional[Fill]:
+        return self._execute(snap, order, selling=True)
+
+    def _execute(self, snap: Snapshot, order: Order, selling: bool) -> Optional[Fill]:
+        argv = self.render(snap, order, selling=selling)
         log.info("bullpen: %s", " ".join(argv))
 
         if self.bp.dry_run:
@@ -191,7 +240,13 @@ class BullpenExecutor:
                 proc.stdout.strip()[:300],
             )
         self.fills.append(fill)
-        log.info("bullpen fill: %s %.2f @ %.3f", fill.side, fill.shares, fill.price)
+        log.info(
+            "bullpen %s fill: %s %.2f @ %.3f",
+            "sell" if selling else "buy",
+            fill.side,
+            fill.shares,
+            fill.price,
+        )
         return fill
 
     @staticmethod

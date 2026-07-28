@@ -55,6 +55,29 @@ class MarketsConfig:
 
 
 @dataclass
+class ExitsConfig:
+    """Stop loss / take profit. Thresholds are in PROBABILITY POINTS.
+
+    Entered at 0.60 with stop_loss_drop 0.15 -> exits when the bid hits 0.45.
+    Set any threshold to null to disable just that rule.
+    """
+
+    enabled: bool = True
+    stop_loss_drop: Optional[float] = 0.15
+    take_profit_rise: Optional[float] = None
+    trailing_stop_drop: Optional[float] = None
+    max_hold_seconds: Optional[float] = None
+    # Do not churn in the last few seconds: the book widens and the outcome is
+    # nearly decided, so exiting there usually pays the spread for nothing.
+    no_exit_within_seconds: float = 20.0
+    min_hold_seconds: float = 0.0
+    # Account-level kill switch on equity drawdown (sees open positions too,
+    # unlike the daily loss limit which only counts closed trades).
+    max_drawdown_usd: Optional[float] = None
+    max_drawdown_pct: Optional[float] = 0.25
+
+
+@dataclass
 class BullpenConfig:
     """How to invoke the external Bullpen CLI.
 
@@ -70,6 +93,22 @@ class BullpenConfig:
             "bullpen",
             "polymarket",
             "buy",
+            "--token",
+            "{token_id}",
+            "--shares",
+            "{shares}",
+            "--limit-price",
+            "{price}",
+            "--yes",
+            "--json",
+        ]
+    )
+    # Used to exit a position early (stop loss / take profit).
+    sell_template: list[str] = field(
+        default_factory=lambda: [
+            "bullpen",
+            "polymarket",
+            "sell",
             "--token",
             "{token_id}",
             "--shares",
@@ -112,6 +151,7 @@ class Config:
     fees: FeeConfig = field(default_factory=FeeConfig)
     markets: MarketsConfig = field(default_factory=MarketsConfig)
     execution: ExecutionConfig = field(default_factory=ExecutionConfig)
+    exits: ExitsConfig = field(default_factory=ExitsConfig)
     strategy: StrategyConfig = field(default_factory=StrategyConfig)
     gamma_url: str = "https://gamma-api.polymarket.com"
     clob_url: str = "https://clob.polymarket.com"
@@ -145,6 +185,7 @@ def load_config(path: str | Path | None = None) -> Config:
         ("risk", cfg.risk),
         ("fees", cfg.fees),
         ("markets", cfg.markets),
+        ("exits", cfg.exits),
     ):
         if section in raw:
             _merge(target, raw.pop(section))

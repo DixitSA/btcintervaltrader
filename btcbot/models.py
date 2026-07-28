@@ -76,11 +76,23 @@ class Book:
         Returns None if the book cannot fill the whole order -- callers must
         treat that as "do not trade", not as "fill at the last price".
         """
+        return self._sweep(self.asks, shares)
+
+    def sweep_proceeds(self, shares: float) -> Optional[float]:
+        """Average price received to sell `shares` by hitting the bid side.
+
+        This is what an exit actually gets, which is why stops are priced off
+        the bid rather than the mid -- the mid is a price nobody will give you.
+        """
+        return self._sweep(self.bids, shares)
+
+    @staticmethod
+    def _sweep(levels: list[Level], shares: float) -> Optional[float]:
         if shares <= 0:
             return 0.0
         remaining = shares
         notional = 0.0
-        for lvl in self.asks:
+        for lvl in levels:
             take = min(remaining, lvl.size)
             notional += take * lvl.price
             remaining -= take
