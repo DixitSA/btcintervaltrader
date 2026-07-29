@@ -159,17 +159,31 @@ class BacktestReport:
 
     @property
     def win_rate_stderr(self) -> Optional[float]:
-        """Standard error of the observed win rate."""
+        """Standard error of the observed win rate, or None if undefined.
+
+        At p = 0 or p = 1 the binomial standard error is exactly zero: the
+        sample shows no variation, so it carries no information about how much
+        the win rate would move on a rerun. That is a degenerate sample, not a
+        precise one, and it is overwhelmingly likely to be small -- two wins
+        out of two is p = 1. Flooring the variance at some epsilon to keep the
+        arithmetic alive turns that into a microscopic standard error, which
+        `z_score` then divides by and reports as certainty (a 2-trade, 2-win
+        sample used to print z = +530330). Refuse instead, the same way
+        realized_vol_from_series refuses a span it cannot measure.
+        """
         if self.n < 2:
             return None
+        if self.wins == 0 or self.wins == self.n:
+            return None
         p = self.wins / self.n
-        return math.sqrt(max(p * (1.0 - p), 1e-12) / self.n)
+        return math.sqrt(p * (1.0 - p) / self.n)
 
     @property
     def z_score(self) -> Optional[float]:
         """How many standard errors the win rate sits above break-even.
 
-        Below ~2, the sample does not support a claim of edge.
+        Below ~2, the sample does not support a claim of edge. None means the
+        sample cannot support the claim either way -- see win_rate_stderr.
         """
         be = self.breakeven_win_rate
         se = self.win_rate_stderr
@@ -250,10 +264,22 @@ class BacktestReport:
             else:
                 lines.append("  -> Significantly LOSING.")
 
-        z = self.z_score
-        if z is not None and not self.exits.keys() - {EXIT_EXPIRY}:
+        if not self.exits.keys() - {EXIT_EXPIRY}:
             # Only meaningful when every trade ran to expiry (binary payoff).
-            lines.append(f"win-rate z-score      : {z:+.2f}")
+            z = self.z_score
+            if z is not None:
+                lines.append(f"win-rate z-score      : {z:+.2f}")
+            elif self.n >= 2 and self.wins in (0, self.n):
+                # Say why rather than dropping the line: a missing z-score on
+                # an all-wins run reads as a rendering quirk, when it is the
+                # single most important thing to know about that sample.
+                every = "won" if self.wins else "lost"
+                lines.append(
+                    f"win-rate z-score      : -  (every trade {every}; a win "
+                    "rate of 0% or 100% has no\n"
+                    "                           spread to measure, so the "
+                    "sample cannot show significance)"
+                )
 
         if self.n < 100:
             lines.append(

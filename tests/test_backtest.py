@@ -167,6 +167,44 @@ def test_breakeven_includes_the_entry_fee():
     assert report.breakeven_win_rate == pytest.approx(0.52)
 
 
+@pytest.mark.parametrize("pnl,label", [(1.0, "all wins"), (-1.0, "all losses")])
+def test_degenerate_win_rate_reports_no_z_score_rather_than_a_huge_one(pnl, label):
+    """A 0% or 100% win rate must read as "cannot tell", not as certainty.
+
+    The binomial standard error is exactly zero at both boundaries. Flooring it
+    to keep the division alive made a 2-trade, 2-win sample print z = +530330 --
+    infinite confidence from the least informative sample there is, in the one
+    statistic the CLI tells the user to sanity-check against zero.
+    """
+    report = BacktestReport(starting_bankroll=100.0)
+    report.trades = [
+        WindowResult(slug=f"w{i}", side=UP, shares=10, entry_price=0.50,
+                     outcome=UP, pnl=pnl)
+        for i in range(2)
+    ]
+
+    assert report.win_rate == pytest.approx(1.0 if pnl > 0 else 0.0)
+    assert report.win_rate_stderr is None, f"{label}: se is 0, not merely small"
+    assert report.z_score is None, f"{label}: z must be None, not a huge number"
+
+    rendered = report.render()
+    assert "win-rate z-score      : -" in rendered
+    assert ("every trade won" if pnl > 0 else "every trade lost") in rendered
+
+
+def test_z_score_still_computed_off_the_boundary():
+    """The refusal is confined to p = 0 and p = 1; ordinary samples still report."""
+    report = BacktestReport(starting_bankroll=100.0)
+    report.trades = [
+        WindowResult(slug=f"w{i}", side=UP, shares=10, entry_price=0.50,
+                     outcome=UP, pnl=1.0 if i < 3 else -1.0)
+        for i in range(4)
+    ]
+    # 3/4 wins, break-even 0.50 (no fee model attached).
+    assert report.win_rate_stderr == pytest.approx((0.75 * 0.25 / 4) ** 0.5)
+    assert report.z_score == pytest.approx(0.25 / report.win_rate_stderr)
+
+
 def test_breakeven_with_fees_makes_the_z_score_stricter(sim_snapshots):
     """The fee-inclusive bar must never be easier than the fee-free one."""
     strat = build_strategy(
