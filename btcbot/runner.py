@@ -15,11 +15,12 @@ from .execution import build_executor
 from .exits import DrawdownGuard, ExitPolicy
 from .fees import build_fee_model
 from .learner import Calibrator, OutcomeRecord, OutcomeStore
-from .models import Market, Order, Snapshot
+from .models import DOWN, UP, Market, Order, Snapshot
 from .portfolio import Portfolio, mark_for
 from .recorder import SnapshotWriter
 from .risk import RiskManager
 from .shadow import ShadowLedger
+from .signals import settlement_side
 from .spot import SpotFeed, SpotFeedManager
 from .strategies.base import Signal, Strategy
 from .venues import build_venue
@@ -64,6 +65,9 @@ class Runner:
         self._strikes: dict[str, float] = {}
         # slug -> signal probability at trade time, used for calibration.
         self._signal_probs: dict[str, float] = {}
+        # slug -> (ts, spot) of the last reading taken while the window was open.
+        # Settlement must use this, not a price fetched after the close.
+        self._last_spot: dict[str, tuple[float, float]] = {}
 
         # Online calibration from observed trade outcomes.
         self.calibrator: Optional[Calibrator] = None
@@ -201,6 +205,23 @@ class Runner:
             self._outcome_store.append(rec)
             self.calibrator.observe(signal_prob, trade.pnl > 0)
 
+    def _close_spot(
+        self, slug: str, end_ts: float, max_age: float = 30.0
+    ) -> Optional[float]:
+        """Last spot observed while the window was open, if near enough its close.
+
+        Returns None when the newest in-window reading is more than `max_age`
+        before the close: on recorded data, calling such a reading terminal got
+        the winner wrong on 4 of 4 windows.
+        """
+        entry = self._last_spot.get(slug)
+        if entry is None:
+            return None
+        ts, spot = entry
+        if end_ts - ts > max_age:
+            return None
+        return spot
+
     def _spot_for(self, slug: str) -> Optional[float]:
         family = self.cfg.markets.family_for(slug)
         if family:
@@ -217,11 +238,10 @@ class Runner:
             if now <= end_ts + 60:
                 continue
             strike = self._strikes.get(slug)
-            spot_px = self._spot_for(slug)
-            if spot_px is not None and strike is not None and strike > 0:
-                winning_side = "Up" if spot_px > strike else "Down"
-            else:
-                winning_side = None
+            # Same rule as _settle_expired: the spot from while the window was
+            # open, and no verdict when it sits inside the noise band.
+            spot_px = self._close_spot(slug, end_ts)
+            winning_side = settlement_side(spot_px, strike)
             settled = self.shadow.settle(slug, winning_side, spot_px, now)
             for s in settled:
                 self.shadow.append_settled(s)
@@ -229,8 +249,10 @@ class Runner:
     def _settle_expired(self, now: float) -> None:
         """Resolve positions whose window has ended.
 
-        Determines win/loss from spot vs the market's strike. If the spot
-        feed or strike is unavailable, falls back to the last mark.
+        Uses the last spot seen while the window was still OPEN, compared to the
+        strike, and abstains when spot is too close to the strike to call. A
+        None winning_side voids the position: the stake comes back rather than
+        the bot booking a coin flip as though it knew the answer.
         """
         for slug, pos in list(self.portfolio.positions.items()):
             end_ts = self._window_end.get(
@@ -239,16 +261,28 @@ class Runner:
             if now <= end_ts + 60:
                 continue
 
-            spot_px = self._spot_for(slug)
             strike = self._strikes.get(slug)
-            if spot_px is not None and strike is not None and strike > 0:
-                winning_side = "Up" if spot_px > strike else "Down"
-                source = f"spot ${spot_px:,.2f} vs strike ${strike:,.2f}"
+            close_spot = self._close_spot(slug, end_ts)
+            winning_side = settlement_side(close_spot, strike)
+            if winning_side is not None:
+                winning_side = UP if winning_side == UP else DOWN
+                source = f"spot ${close_spot:,.2f} vs strike ${strike:,.2f}"
             else:
-                # Fallback: use last mark (converges to 0 or 1 near expiry)
-                mark = pos.last_mark if pos.last_mark is not None else pos.entry_price
-                winning_side = pos.side if mark >= 0.5 else None
-                source = f"last mark {mark:.3f} (APPROXIMATE)"
+                # Either no close-adjacent spot, or spot inside the noise band.
+                # The last mark is the market's own verdict and it settles on the
+                # index Kalshi uses, so prefer it -- but only once converged.
+                mark = pos.last_mark
+                if mark is not None and (mark >= 0.9 or mark <= 0.1):
+                    winning_side = pos.side if mark >= 0.9 else (
+                        DOWN if pos.side == UP else UP
+                    )
+                    source = f"terminal mark {mark:.3f}"
+                else:
+                    winning_side = None
+                    source = (
+                        f"UNDETERMINED (spot {close_spot} vs strike {strike}, "
+                        f"mark {mark}) -- voided"
+                    )
 
             trade = self.portfolio.settle(
                 slug, winning_side, now, fee_model=self.fee_model
@@ -263,6 +297,7 @@ class Runner:
                 self.portfolio.equity,
             )
             self._strikes.pop(slug, None)
+            self._last_spot.pop(slug, None)
             signal_prob = self._signal_probs.pop(slug, 0.5)
 
             if self._outcome_store is not None and self.calibrator is not None:
@@ -325,6 +360,14 @@ class Runner:
             self._window_end.setdefault(market.slug, market.end_ts)
             if market.strike is not None:
                 self._strikes.setdefault(market.slug, market.strike)
+
+            # Keep the newest spot seen while the window was still OPEN. The
+            # outcome is fixed at the close, but settlement runs 60s later, and
+            # fetching spot then reads a price the window never saw. Spot moves
+            # a median 0.0386% per minute against a median strike distance of
+            # 0.2663%, so that drift silently flips near-strike windows.
+            if spot_px is not None and now <= market.end_ts:
+                self._last_spot[market.slug] = (now, spot_px)
 
             if not (self.trade and self.strategy and self.executor):
                 continue

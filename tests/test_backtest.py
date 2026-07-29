@@ -49,20 +49,103 @@ def test_snapshot_roundtrips_through_serialisation():
     assert restored.down_book.best_bid == snap.down_book.best_bid
 
 
-def test_infer_outcome_prefers_spot_versus_strike():
-    up = make_snapshot(spot=100_500.0, strike=100_000.0)
-    down = make_snapshot(spot=99_500.0, strike=100_000.0)
+def test_voided_windows_are_not_counted_as_losses():
+    """A void is a MISSING observation, not a loss.
+
+    It closes at the entry price, so `won = pnl > 0` is False and it used to
+    land in the win-rate denominator -- dragging the rate down with windows that
+    were never scored. Its fee is real and stays in the P&L.
+    """
+    from btcbot.portfolio import EXIT_VOID
+
+    report = BacktestReport(starting_bankroll=100.0)
+    report.trades = [
+        WindowResult(slug="w1", side=UP, shares=10, entry_price=0.50, outcome=UP, pnl=5.0),
+        WindowResult(slug="w2", side=UP, shares=10, entry_price=0.50, outcome=DOWN, pnl=-5.0),
+        WindowResult(slug="w3", side=UP, shares=10, entry_price=0.50, outcome=None,
+                     pnl=-0.02, exit_reason=EXIT_VOID),
+    ]
+
+    assert report.voided == 1
+    assert report.n == 2, "void must be out of the scored denominator"
+    assert report.wins == 1
+    assert report.win_rate == pytest.approx(0.50), "not 1/3"
+    # The fee it cost is still real money.
+    assert report.total_pnl == pytest.approx(-0.02)
+    # And it is excluded from the significance test as missing data.
+    assert len(report.trade_returns) == 2
+
+
+def test_all_void_report_has_no_win_rate():
+    from btcbot.portfolio import EXIT_VOID
+
+    report = BacktestReport(starting_bankroll=100.0)
+    report.trades = [
+        WindowResult(slug="w", side=UP, shares=10, entry_price=0.50, outcome=None,
+                     pnl=-0.02, exit_reason=EXIT_VOID)
+    ]
+    assert report.n == 0
+    assert report.win_rate is None
+    assert report.voided == 1
+
+
+# -- outcome inference -----------------------------------------------
+#
+# Validated against Kalshi's own `result` field on 45 recorded windows: the old
+# rule (spot vs strike first, market price only as a fallback) agreed on 84.4%.
+# The order below agrees on 100% of what it will answer for, and abstains on
+# the rest. Terminal snapshots use ts=1900.0 because end_ts is 1900.0.
+
+TERMINAL = 1900.0
+
+
+def test_infer_outcome_uses_spot_versus_strike_when_market_is_undecided():
+    up = make_snapshot(spot=100_500.0, strike=100_000.0, ts=TERMINAL)
+    down = make_snapshot(spot=99_500.0, strike=100_000.0, ts=TERMINAL)
     assert infer_outcome([up]) == UP
     assert infer_outcome([down]) == DOWN
 
 
+def test_infer_outcome_prefers_the_converged_market_price_over_spot():
+    """The market settles on the index Kalshi uses; our spot feed does not.
+
+    Spot says Up by 0.5%, the book says Up is worth 2c. Kalshi's index is what
+    the book is pricing, so the book wins. Measured: converged market price 39/39
+    correct, spot 38/41.
+    """
+    snap = make_snapshot(p_up=0.02, spot=100_500.0, strike=100_000.0, ts=TERMINAL)
+    assert infer_outcome([snap]) == DOWN
+
+
+def test_infer_outcome_refuses_a_window_not_recorded_to_its_close():
+    """Recording stops when the machine sleeps or the supervisor restarts.
+
+    A mid-window snapshot says nothing about the result -- treating one as
+    terminal got the winner wrong on 4 of 4 such windows in data/.
+    """
+    stale = make_snapshot(spot=100_500.0, strike=100_000.0, ts=1300.0)  # 600s early
+    assert infer_outcome([stale]) is None
+    # ...and is accepted once it is near the close.
+    assert infer_outcome([make_snapshot(spot=100_500.0, strike=100_000.0, ts=1880.0)]) == UP
+
+
+def test_infer_outcome_abstains_when_spot_is_inside_the_noise_band():
+    """Kalshi averages the last 60s of its index; spot moves ~0.04% in 60s.
+
+    Within that band an instantaneous print is not evidence, so refuse rather
+    than book a coin flip. p_up is held mid-book so the market cannot decide it.
+    """
+    snap = make_snapshot(p_up=0.5, spot=100_010.0, strike=100_000.0, ts=TERMINAL)
+    assert infer_outcome([snap]) is None
+
+
 def test_infer_outcome_falls_back_to_terminal_price():
-    snap = make_snapshot(p_up=0.98, strike=None, spot=None)
+    snap = make_snapshot(p_up=0.98, strike=None, spot=None, ts=TERMINAL)
     assert infer_outcome([snap]) == UP
 
 
 def test_infer_outcome_none_when_undecidable():
-    snap = make_snapshot(p_up=0.5, strike=None, spot=None)
+    snap = make_snapshot(p_up=0.5, strike=None, spot=None, ts=TERMINAL)
     assert infer_outcome([snap]) is None
 
 

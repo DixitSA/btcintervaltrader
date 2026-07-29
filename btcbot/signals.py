@@ -8,6 +8,43 @@ from typing import Optional
 from .models import DOWN, UP, Snapshot
 
 
+#: How close spot may sit to the strike before an instantaneous print stops
+#: being able to resolve the outcome, as a fraction of the strike.
+#:
+#: Kalshi settles these windows on the average of the last SIXTY SECONDS of the
+#: CF Benchmarks index, not on a point reading. So the honest resolution limit
+#: is roughly how far spot travels in a minute. Measured over 20,829 overlapping
+#: 60s intervals in data/, the median |move| was 0.0386% of price, mean 0.0515%.
+#: 0.04% is that median -- derived from the settlement mechanism, NOT tuned to
+#: maximise agreement on a sample (agreement was identical for every band from
+#: 0.00% to 0.10%, so there was nothing to tune).
+SETTLEMENT_NOISE_PCT = 0.0004
+
+
+def settlement_side(
+    spot: Optional[float],
+    strike: Optional[float],
+    noise_pct: float = SETTLEMENT_NOISE_PCT,
+) -> Optional[str]:
+    """Which side a spot-vs-strike reading implies, or None if it cannot say.
+
+    Returns None when spot is within `noise_pct` of the strike: our Binance feed
+    is a proxy for a different index averaged over a different interval, so
+    inside that band it is not evidence. Measured against real Kalshi
+    settlements, the spot rule was right 31/31 when more than 0.10% from the
+    strike but only 1/3 within 0.02% -- worse than a coin flip.
+
+    One implementation shared by the live runner and the backtester on purpose:
+    if those two decided outcomes differently, every backtest would be
+    describing a bot that does not exist.
+    """
+    if spot is None or strike is None or strike <= 0 or spot <= 0:
+        return None
+    if abs(spot - strike) / strike < noise_pct:
+        return None
+    return UP if spot > strike else DOWN
+
+
 def normal_cdf(x: float) -> float:
     return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
 

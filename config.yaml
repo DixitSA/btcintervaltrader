@@ -90,7 +90,24 @@ exits:
   # second time. On a near-coin-flip that is a real cost -- noise stops you out
   # of positions that would have won. Measure it before trusting it:
   #   python -m btcbot compare-exits
-  enabled: true
+  #
+  # MEASURED 2026-07-29 on 45 recorded windows (compare-exits):
+  #             trades  profit%     ROI     P&L      t
+  #   no stops      29    62.1%  -2.53%   -1.61  -0.42
+  #   with stops    40    30.0%  -9.05%   -6.01  -1.48
+  #
+  # The stop fired on 28 of 40 positions. That is the failure mode described
+  # above, not bad luck: a 0.15 drop from the average entry of 0.652 exits at
+  # 0.50, which is inside the ordinary noise of a market that hovers near a coin
+  # flip. So it is off by default now.
+  #
+  # This is NOT a tuned parameter and the sample cannot support tuning -- 45
+  # windows, and neither t is significant. It is off because the mechanism is
+  # understood and because a 70% stop-out rate truncates windows before they
+  # settle, which costs us the very outcome labels we are recording. Re-measure
+  # with `compare-exits` once there are a few thousand windows; if stops turn out
+  # to help, that will show up as a positive t difference, not a prettier P&L.
+  enabled: false
   stop_loss_drop: 0.15
   take_profit_rise: null
   trailing_stop_drop: null

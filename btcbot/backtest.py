@@ -21,9 +21,9 @@ from .execution import PaperExecutor
 from .fees import build_fee_model
 from .exits import DrawdownGuard, ExitPolicy
 from .models import DOWN, UP, Fill, Order, Snapshot
-from .portfolio import EXIT_EXPIRY, Portfolio, mark_for
+from .portfolio import EXIT_EXPIRY, EXIT_VOID, Portfolio, mark_for
 from .risk import RiskManager
-from .signals import market_implied_up, realized_vol_from_series
+from .signals import market_implied_up, realized_vol_from_series, settlement_side
 from .strategies.base import Strategy
 
 
@@ -68,18 +68,44 @@ class BacktestReport:
     fee_model: Optional[object] = None
 
     @property
+    def resolved_trades(self) -> list:
+        """Trades whose window actually resolved.
+
+        A void is a window we could not determine the winner of (see
+        infer_outcome): the stake comes back and only the entry fee is lost. Its
+        P&L is real and stays in the money numbers, but it is NOT evidence about
+        whether the rule picks the right side, so it must stay out of the
+        win-rate denominator. Counting voids as losses -- which `won = pnl > 0`
+        did, since a void nets the entry fee -- pushed the win rate down and
+        made it look like the strategy was being beaten by windows that were
+        never scored at all.
+        """
+        return [t for t in self.trades if t.exit_reason != EXIT_VOID]
+
+    @property
+    def voided(self) -> int:
+        return len(self.trades) - len(self.resolved_trades)
+
+    @property
     def n(self) -> int:
-        return len(self.trades)
+        return len(self.resolved_trades)
 
     @property
     def wins(self) -> int:
-        return sum(1 for t in self.trades if t.won)
+        return sum(1 for t in self.resolved_trades if t.won)
 
     @property
     def trade_returns(self) -> list[float]:
-        """Per-trade return on stake. The basis for the significance test."""
+        """Per-trade return on stake. The basis for the significance test.
+
+        Voids are excluded: a void is a MISSING observation, not a ~0% return.
+        The window did resolve in reality -- we just could not tell how -- so
+        feeding it in as a small loss would shrink the measured variance and
+        flatter the t-statistic. The fee it cost still shows up in total_pnl and
+        the equity curve, which track simulated cash rather than evidence.
+        """
         out = []
-        for t in self.trades:
+        for t in self.resolved_trades:
             stake = t.shares * t.entry_price
             if stake > 0:
                 out.append(t.pnl / stake)
@@ -212,6 +238,15 @@ class BacktestReport:
             f"windows with signal   : {self.windows_with_signal}",
             f"trades taken          : {self.n}",
         ]
+        if self.voided:
+            lines.append(
+                f"  (+{self.voided} voided        : outcome undeterminable -- not scored. "
+                "Stake returned,\n"
+                "                           entry fee lost. Usually a window whose "
+                "recording stopped\n"
+                "                           before the close, or spot too near the "
+                "strike to call.)"
+            )
         if not self.n:
             lines += [
                 "",
@@ -289,27 +324,52 @@ class BacktestReport:
         return "\n".join(lines)
 
 
-def infer_outcome(window: list[Snapshot]) -> Optional[str]:
-    """Determine which side won a recorded window.
+#: A window whose last snapshot is further than this from its close was not
+#: observed to resolution, so nothing in it identifies the winner.
+MAX_SECONDS_FROM_CLOSE = 30.0
 
-    Prefers spot vs strike at the final snapshot. Falls back to the terminal
-    market price, which converges to 0 or 1 at resolution.
+
+def infer_outcome(
+    window: list[Snapshot], max_seconds_from_close: float = MAX_SECONDS_FROM_CLOSE
+) -> Optional[str]:
+    """Which side won a recorded window, or None when the data cannot say.
+
+    Validated against Kalshi's own `result` field for 45 recorded windows. The
+    previous version -- spot vs strike at the last snapshot, market price only
+    as a fallback -- agreed with Kalshi on 84.4% of them. This one agrees on
+    100% of the windows it will answer for (41/41), refusing the other 4.
+
+    Order matters, and it is the reverse of what it was:
+
+    1. Refuse if the last snapshot is not near the close. Recording stops when
+       the machine sleeps or the supervisor restarts, and a snapshot from
+       mid-window says nothing about the result. Treating one as terminal was
+       wrong on 4 of 4 such windows -- not noise, a fabricated answer.
+
+    2. Prefer the terminal MARKET price once it has converged. The market
+       settles on the same CF Benchmarks index Kalshi does, so at resolution its
+       price is evidence about the real outcome; our Binance spot is a proxy for
+       a different index over a different interval. Converged market price was
+       right 39/39, spot 38/41.
+
+    3. Fall back to spot vs strike, which abstains inside the noise band. See
+       settlement_side.
     """
     if not window:
         return None
     last = window[-1]
 
-    if last.spot is not None and last.market.strike is not None:
-        return UP if last.spot > last.market.strike else DOWN
+    if last.market.end_ts - last.ts > max_seconds_from_close:
+        return None
 
     p_up = market_implied_up(last)
-    if p_up is None:
-        return None
-    if p_up >= 0.9:
-        return UP
-    if p_up <= 0.1:
-        return DOWN
-    return None
+    if p_up is not None:
+        if p_up >= 0.9:
+            return UP
+        if p_up <= 0.1:
+            return DOWN
+
+    return settlement_side(last.spot, last.market.strike)
 
 
 def group_windows(snaps: Iterable[Snapshot]) -> dict[str, list[Snapshot]]:
