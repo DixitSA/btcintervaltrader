@@ -1,0 +1,12 @@
+httpx>=0.27
+PyYAML>=6.0
+
+# Required only to place Kalshi orders (RSA-PSS request signing).
+# Public market data and paper trading work without it.
+cryptography>=42.0
+
+# Optional -- only needed for `live` mode order submission:
+# py-clob-client>=0.17
+
+# Dev:
+# pytest>=8.0

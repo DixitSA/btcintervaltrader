@@ -1,0 +1,135 @@
+# Trading configuration. Safe to commit -- no secrets here.
+#
+# mode is "paper" unless you change it AND set BTCBOT_I_UNDERSTAND_REAL_MONEY=yes.
+mode: paper
+
+# kalshi | polymarket. Kalshi is a CFTC-regulated US exchange; its fee model is
+# very different (see the fees section below) so results are NOT transferable
+# between venues.
+venue: kalshi
+
+poll_seconds: 2.0
+data_dir: data
+
+kalshi_url: https://api.elections.kalshi.com/trade-api/v2
+gamma_url: https://gamma-api.polymarket.com
+clob_url: https://clob.polymarket.com
+# api.binance.com returns 451 (geo-blocked) from the US, which makes every
+# recorded snapshot carry spot: null -- silently, since the feed only warns.
+# data-api.binance.vision is Binance's public market-data mirror: same REST
+# shape, same BTCUSDT symbol, same global book, no geo-block.
+# NB the settlement source for KXBTC15M is CF Benchmarks BRTI, not Binance;
+# this feed is for signals only (see spot.py).
+spot_url: https://data-api.binance.vision
+
+markets:
+  # Every window family to trade. ONE 15-minute family caps you at 4 trades/hour
+  # (one window at a time). Adding families is the honest way to raise trade
+  # count -- it does not change what you are betting on. Uncomment to widen:
+  # Kalshi: SERIES TICKERS. Polymarket: slug prefixes.
+  slug_prefixes:
+    - KXBTC15M          # Bitcoin up/down, 15-minute windows
+    # - KXETH15M        # Ethereum, 15-minute
+    # - KXBTCD          # Bitcoin, daily
+    # Polymarket equivalents: btc-updown-15m, btc-updown-5m, eth-updown-15m
+  window_seconds: 900
+  # Do not enter in the last 30s: the book thins and you are racing bots with
+  # colocated infrastructure you do not have.
+  min_seconds_remaining: 30
+  max_seconds_remaining: 900
+  min_book_depth_usd: 50.0
+  max_spread: 0.05
+
+fees:
+  # VERIFY THESE against your own fills before trusting any backtest.
+  #
+  # Kalshi charges a TAKER FEE UP FRONT on every fill:
+  #     fee = ceil(0.07 * contracts * P * (1 - P)) rounded up to the cent
+  # That peaks at 1.75c per contract at 50c -- 3.5% of a 50c stake, paid on
+  # entry AND again on exit if you stop out. It is roughly 3.5x the total fee
+  # burden of the Polymarket model on the same trades.
+  kalshi_taker_coefficient: 0.07
+  kalshi_maker_coefficient: 0.0
+  # Polymarket model: no taker fee, a cut of PROFIT at settlement.
+  taker_fee_bps: 0.0
+  winnings_fee_bps: 200.0
+  slippage: 0.005
+
+risk:
+  bankroll_usd: 100.0
+  max_stake_per_trade_usd: 5.0
+  max_stake_fraction: 0.02
+  max_concurrent_positions: 1
+  max_trades_per_hour: 8
+  # Cap on the combined cost basis of ALL open positions, as a fraction of the
+  # starting bankroll. Raise max_concurrent_positions without raising this and
+  # you are risking N times what you think per moment: Kelly sizes each
+  # position as though it were your only one.
+  max_total_exposure_fraction: 0.10
+  daily_loss_limit_usd: 20.0
+  max_entry_price: 0.90
+  min_entry_price: 0.10
+  # Quarter Kelly. Full Kelly on a probability estimate you are not sure of is
+  # how accounts go to zero even with a genuine edge.
+  kelly_fraction: 0.25
+
+exits:
+  # Stop loss / take profit. Thresholds are in PROBABILITY POINTS, not percent:
+  # entered at 0.60 with stop_loss_drop 0.15 -> exits when the BID hits 0.45.
+  #
+  # A stop here means selling back into the book, so you cross the spread a
+  # second time. On a near-coin-flip that is a real cost -- noise stops you out
+  # of positions that would have won. Measure it before trusting it:
+  #   python -m btcbot compare-exits
+  enabled: true
+  stop_loss_drop: 0.15
+  take_profit_rise: null
+  trailing_stop_drop: null
+  max_hold_seconds: null
+  # Do not churn in the final seconds: the book widens and the outcome is
+  # nearly decided, so exiting there mostly pays the spread for nothing.
+  no_exit_within_seconds: 20.0
+  min_hold_seconds: 0.0
+  # Account-level kill switch on equity drawdown. Unlike the daily loss limit
+  # (closed trades only) this also sees open positions under water.
+  max_drawdown_usd: null
+  max_drawdown_pct: 0.25
+
+execution:
+  # paper   -> simulate against the live book (safe, default)
+  # venue    -> place real orders through the configured venue (Kalshi/CLOB)
+  # bullpen -> shell out to the Bullpen CLI (Polymarket only)
+  backend: paper
+
+  bullpen:
+    binary: bullpen
+    # VERIFY THIS against `bullpen polymarket buy --help` on your machine, then
+    # run `python -m btcbot verify-bullpen`. These flags are a starting point,
+    # not confirmed syntax -- the published docs were unreachable when this was
+    # written. Placeholders: {token_id} {side} {shares} {price} {slug}
+    # {condition_id} {outcome}
+    buy_template:
+      - bullpen
+      - polymarket
+      - buy
+      - --token
+      - "{token_id}"
+      - --shares
+      - "{shares}"
+      - --limit-price
+      - "{price}"
+      - --yes
+      - --json
+    help_template: [bullpen, polymarket, buy, --help]
+    timeout_seconds: 30.0
+    # Logs the command instead of running it. Leave true until verified.
+    dry_run: true
+
+strategy:
+  name: volume_threshold
+  params:
+    min_volume_usd: 500000
+    direction: follow
+    # 0.0 means "this rule is no better than the market price", which is the
+    # honest default. Raise it only if your own backtest justifies it.
+    assumed_edge: 0.0

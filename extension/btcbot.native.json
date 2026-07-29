@@ -1,0 +1,7 @@
+{
+  "name": "btcbot.native",
+  "description": "Bridge between btcbot overlay extension and btcbot server",
+  "path": "C:\\Coding Projects\\BTC Interval Trader\\btcintervaltrader\\extension\\native_host.bat",
+  "type": "stdio",
+  "allowed_extensions": ["btcbot-overlay@sahil.xyz"]
+}
