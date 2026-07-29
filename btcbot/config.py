@@ -6,12 +6,15 @@ Secrets live in .env (never checked in).
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
 import yaml
+
+log = logging.getLogger(__name__)
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent.parent / "config.yaml"
 
@@ -41,13 +44,10 @@ class FeeConfig:
     """Fees are venue policy and change. Verify against live fills before
     trusting any backtest produced with these numbers.
 
-    Polymarket fields are the *_bps pair. Kalshi uses its published taker
-    formula instead -- ceil(0.07 * C * P * (1-P)) charged on every fill, which
-    peaks at 1.75c per contract at 50c. See fees.py.
+    Kalshi's published taker formula -- ceil(0.07 * C * P * (1-P)) charged on
+    every fill, peaking at 1.75c per contract at 50c. See fees.py.
     """
 
-    taker_fee_bps: float = 0.0
-    winnings_fee_bps: float = 200.0
     kalshi_taker_coefficient: float = 0.07
     kalshi_maker_coefficient: float = 0.0
     # Modelled slippage beyond the quoted book, in cents of probability.
@@ -80,8 +80,8 @@ def strike_bounds_for_prefix(prefix: str) -> tuple[float, float]:
 class FamilyConfig:
     """One asset family: market prefix + spot config + strike bounds.
 
-    `prefix` is the Kalshi series ticker (KXBTC15M) or Polymarket slug prefix
-    (btc-updown-15m).  `spot_symbol` is the Binance trading pair (BTCUSDT).
+    `prefix` is the Kalshi series ticker (KXBTC15M), matched against the start
+    of a market ticker.  `spot_symbol` is the Binance trading pair (BTCUSDT).
     `display_name` is a short label for the UI (BTC, ETH, SOL).
     """
     prefix: str
@@ -107,7 +107,7 @@ class FamilyConfig:
 
 
 def _default_spot(prefix: str) -> str:
-    """Derive a Binance symbol from a Kalshi series or Polymarket slug."""
+    """Derive a Binance symbol from a Kalshi series ticker."""
     # KXBTC15M / KXETH15M / KXSOL15M → BTCUSDT / ETHUSDT / SOLUSDT
     for sym in ("BTC", "ETH", "SOL"):
         if sym in prefix.upper():
@@ -248,64 +248,10 @@ class ExitsConfig:
 
 
 @dataclass
-class BullpenConfig:
-    """How to invoke the external Bullpen CLI.
-
-    The template is deliberately explicit rather than built from guessed flags:
-    the published syntax could not be verified from the build environment, and
-    a wrong flag on an order path fails silently or sizes wrongly. Verify with
-    `btcbot verify-bullpen` before trading.
-    """
-
-    binary: str = "bullpen"
-    buy_template: list[str] = field(
-        default_factory=lambda: [
-            "bullpen",
-            "polymarket",
-            "buy",
-            "--token",
-            "{token_id}",
-            "--shares",
-            "{shares}",
-            "--limit-price",
-            "{price}",
-            "--yes",
-            "--json",
-        ]
-    )
-    # Used to exit a position early (stop loss / take profit).
-    sell_template: list[str] = field(
-        default_factory=lambda: [
-            "bullpen",
-            "polymarket",
-            "sell",
-            "--token",
-            "{token_id}",
-            "--shares",
-            "{shares}",
-            "--limit-price",
-            "{price}",
-            "--yes",
-            "--json",
-        ]
-    )
-    # Command used by `verify-bullpen` to confirm the binary and subcommand
-    # exist without placing an order.
-    help_template: list[str] = field(
-        default_factory=lambda: ["bullpen", "polymarket", "buy", "--help"]
-    )
-    timeout_seconds: float = 30.0
-    # Log the command without running it. Start here.
-    dry_run: bool = True
-
-
-@dataclass
 class ExecutionConfig:
-    # paper   -> simulate against the recorded book (default, safe)
-    # bullpen -> shell out to the Bullpen CLI
-    # clob    -> sign EIP-712 orders directly via py-clob-client
+    # paper -> simulate against the live book (default, safe)
+    # venue -> place real orders through Kalshi
     backend: str = "paper"
-    bullpen: BullpenConfig = field(default_factory=BullpenConfig)
 
 
 @dataclass
@@ -341,7 +287,10 @@ class ShadowConfig:
 @dataclass
 class Config:
     mode: str = "paper"  # paper | live
-    venue: str = "kalshi"  # kalshi | polymarket
+    # Kalshi is the only venue. Kept as a field so the venue-neutral layers
+    # above (strategies, risk, portfolio, exits, backtest) keep going through
+    # the registry rather than importing the adapter directly.
+    venue: str = "kalshi"
     risk: RiskConfig = field(default_factory=RiskConfig)
     fees: FeeConfig = field(default_factory=FeeConfig)
     markets: MarketsConfig = field(default_factory=MarketsConfig)
@@ -351,8 +300,6 @@ class Config:
     shadow: ShadowConfig = field(default_factory=ShadowConfig)
     strategy: StrategyConfig = field(default_factory=StrategyConfig)
     kalshi_url: str = "https://api.elections.kalshi.com/trade-api/v2"
-    gamma_url: str = "https://gamma-api.polymarket.com"
-    clob_url: str = "https://clob.polymarket.com"
     spot_url: str = "https://api.binance.com"
     poll_seconds: float = 2.0
     data_dir: str = "data"
@@ -360,6 +307,20 @@ class Config:
     @property
     def is_live(self) -> bool:
         return self.mode == "live"
+
+
+def _drop_retired(raw: dict[str, Any], keys: tuple[str, ...], section: str) -> None:
+    """Discard config keys that no longer exist, with a warning.
+
+    Retired keys are ignored rather than rejected: _merge treats anything
+    unknown as fatal, which is right for a typo but wrong for a key this
+    codebase used to define itself.
+    """
+    for key in keys:
+        if key in raw:
+            raw.pop(key)
+            where = f"{section}.{key}" if section else key
+            log.warning("ignoring retired config key %s (Polymarket support removed)", where)
 
 
 def _merge(dc: Any, raw: dict[str, Any]) -> Any:
@@ -395,6 +356,16 @@ def load_config(path: str | Path | None = None) -> Config:
             families[key] = FamilyConfig(prefix=p)
         markets_raw["families"] = families
 
+    # Polymarket support was removed; tolerate its keys in an existing file
+    # rather than turning an upgrade into a crash on "unknown config key".
+    _drop_retired(raw, ("gamma_url", "clob_url"), "")
+    if "fees" in raw:
+        _drop_retired(raw["fees"] or {}, ("taker_fee_bps", "winnings_fee_bps"), "fees")
+    if raw.get("venue") not in (None, "kalshi"):
+        raise ValueError(
+            f"venue '{raw['venue']}' is not supported -- this bot is Kalshi only."
+        )
+
     for section, target in (
         ("risk", cfg.risk),
         ("fees", cfg.fees),
@@ -412,10 +383,13 @@ def load_config(path: str | Path | None = None) -> Config:
 
     if "execution" in raw:
         ex = raw.pop("execution") or {}
-        bullpen_raw = ex.pop("bullpen", None)
+        _drop_retired(ex, ("bullpen",), "execution")
+        if ex.get("backend") in ("bullpen", "clob"):
+            raise ValueError(
+                f"execution.backend '{ex['backend']}' was a Polymarket path and "
+                "has been removed. Use 'paper' or 'venue'."
+            )
         _merge(cfg.execution, ex)
-        if bullpen_raw:
-            _merge(cfg.execution.bullpen, bullpen_raw)
 
     if "strategy" in raw:
         strat = raw.pop("strategy") or {}

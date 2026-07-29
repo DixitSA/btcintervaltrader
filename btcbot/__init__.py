@@ -1,4 +1,4 @@
-"""btcintervaltrader -- a research harness for Polymarket BTC 15-minute markets.
+"""btcintervaltrader -- a research harness for Kalshi 15-minute crypto markets.
 
 Default posture is paper trading. Live trading requires an explicit opt-in.
 """

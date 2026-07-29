@@ -6,9 +6,11 @@ printer -- it will mostly decline to trade, which is the point. When it does
 fire it is because the quoted price implies a probability that a zero-drift
 walk from current spot says is wrong by more than the round-trip cost.
 
-The hard part is not this code. It is that your spot feed must match the
-oracle Polymarket actually settles on, and your latency must be competitive
-with everyone else running the same idea. See spot.py.
+The hard part is not this code. It is that your spot feed must match the oracle
+Kalshi actually settles on -- the CF Benchmarks real-time index for the asset,
+averaged over the last sixty seconds, not an instantaneous Binance print -- and
+your latency must be competitive with everyone else running the same idea.
+See spot.py.
 """
 
 from __future__ import annotations

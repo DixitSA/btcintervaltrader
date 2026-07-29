@@ -1,7 +1,7 @@
 # btcintervaltrader
 
-A research harness for BTC 15-minute Up/Down prediction markets, on **Kalshi**
-(default) or Polymarket.
+A research harness for **Kalshi** 15-minute Up/Down crypto markets (BTC, ETH
+and SOL).
 
 It can trade. But it is built to make you **prove a rule works before it lets you
 bet on it**, because the specific rule this repo started from — *"just bet when
@@ -13,7 +13,8 @@ volume is over $500k"* — does not survive contact with the evidence.
 
 Kalshi runs a rolling **KXBTC15M** series — Bitcoin up or down, a new 15-minute
 window every 15 minutes. Tickers look like `KXBTC15M-26JUL281745` (series, date,
-window close in ET). Polymarket runs the same idea as `btc-updown-15m`.
+window close in ET). The same series exists for ETH (**KXETH15M**) and SOL
+(**KXSOL15M**); each is configured as a "family" in `config.yaml`.
 
 - At the start of the window a reference price is fixed — the **"price to beat"**.
 - You buy **YES** (up) or **NO** (down). Contracts trade between 1c and 99c.
@@ -52,12 +53,11 @@ fee = ceil(0.07 x contracts x P x (1 - P))   # rounded up to the cent
 
 That peaks at **1.75c per contract at 50c** — 3.5% of a 50c stake, paid on entry
 and *again* on exit if you stop out. It falls away toward the extremes, which is
-why cheap longshots look deceptively cheap to trade. On the control dataset,
-identical trades cost **$412 in Kalshi fees vs $116 under the Polymarket model**,
-moving ROI from −1.06% to −2.47%.
+why cheap longshots look deceptively cheap to trade. On the control dataset
+these fees moved ROI from -1.06% to -2.47% on their own.
 
-**Results are not transferable between venues.** A rule tuned on Polymarket fees
-can be nonsense on Kalshi. Re-record and re-backtest after switching.
+**Fees are venue policy and they change.** Verify the coefficient against your
+own fills before trusting any backtest produced with it.
 
 ---
 
@@ -153,10 +153,12 @@ disagrees by more than fees can explain. It will decline most windows. **That is
 the correct behaviour**, not a bug.
 
 > **The single most important detail:** the spot feed in `btcbot/spot.py` is
-> Binance, and it is almost certainly **not** the oracle Polymarket settles on.
-> Before risking money, confirm the exact settlement source and timestamp. A feed
-> that differs by a few dollars will flip precisely the trades you thought were
-> safest.
+> Binance, and it is **not** what Kalshi settles on. These windows resolve on the
+> CF Benchmarks real-time index for the asset (BRTI for BTC, ETHUSDRTI for ETH,
+> SOLUSDRTI for SOL), taken as the **average of the last sixty seconds** before
+> the close -- not an instantaneous print. The bot settles paper positions on
+> spot-vs-strike, so paper P&L can disagree with real settlement on exactly the
+> near-coin-flip windows you care about. Confirm this before risking money.
 
 ---
 
@@ -339,9 +341,7 @@ Live requires **both** `mode: live` and `BTCBOT_I_UNDERSTAND_REAL_MONEY=yes`, so
 no config typo can move real money. Use a dedicated wallet funded with only what
 you can afford to lose.
 
-There are two execution backends. Pick one with `execution.backend`.
-
-#### Option A — Kalshi (`backend: venue`, `venue: kalshi`)
+Set `execution.backend: venue` to place real orders through Kalshi.
 
 ```bash
 pip install cryptography          # RSA-PSS request signing
@@ -362,63 +362,12 @@ export BTCBOT_I_UNDERSTAND_REAL_MONEY=yes
 python -m btcbot live
 ```
 
-#### Option B — Bullpen CLI (`backend: bullpen`, Polymarket only)
-
-Shells out to the [Bullpen CLI](https://cli.bullpen.fi/), which handles auth,
-signing and funding itself. Nothing wallet-related is needed in this repo.
-
-**The flag syntax in `config.yaml` is a starting point, not confirmed syntax** —
-the Bullpen docs were unreachable from the environment this was built in, so the
-invocation is explicit configuration rather than a hardcoded guess. Verify it:
-
-```bash
-python -m btcbot verify-bullpen
-```
-
-That checks the binary exists, runs `bullpen polymarket buy --help`, prints the
-exact command the bot would run, and fails if any flag in your template is
-absent from the help output:
-
-```
-ok   binary: /usr/local/bin/bullpen
-ok   `bullpen polymarket buy --help` succeeded
-
-The bot would invoke:
-  bullpen polymarket buy --token <TOKEN_ID> --shares 10.00 --limit-price 0.520 --yes --json
-
-WARNING: these flags from buy_template do not appear in the help output: --size
-```
-
-Fix `execution.bullpen.buy_template` until it passes, then flip
-`execution.bullpen.dry_run: false`. While `dry_run` is true the command is
-logged and never executed.
-
-#### Option C — Polymarket direct CLOB signing (`backend: clob`)
-
-```bash
-pip install py-clob-client
-cp .env.example .env       # fill in the POLYMARKET_* values
-```
-
-⚠️ **The single most common failure:** if you funded your account through the
-Polymarket website, your USDC is in a **proxy wallet**, not the EOA that owns
-your private key. You must set `POLYMARKET_SIGNATURE_TYPE=1` (email/Magic login)
-or `2` (browser wallet) **and** `POLYMARKET_FUNDER_ADDRESS` to that proxy
-address. Leave it at `0` only if the private key itself holds the USDC.
-Otherwise orders are signed from an address with no balance. The client raises a
-clear error rather than letting you find out at order time.
-
-```bash
-export BTCBOT_I_UNDERSTAND_REAL_MONEY=yes
-python -m btcbot live
-```
-
 ### Known gaps in the live path
 
 Be aware of these before running unattended:
 
 - **No live backend has been executed against a real venue.** The network policy
-  where this was built blocks Kalshi, Polymarket and Bullpen entirely. Request
+  where this was built blocks Kalshi entirely. Request
   shapes follow published documentation and are tested against fakes; the wire
   format is not confirmed. Place one minimum-size order by hand and confirm it
   in the web UI first.
@@ -457,18 +406,16 @@ Be aware of these before running unattended:
 | File | Role |
 |---|---|
 | `btcbot/models.py` | Core types: `Market`, `Book`, `Snapshot`, `Order`, `Fill` |
-| `btcbot/venues/kalshi.py` | Kalshi REST, RSA auth, bid-only book handling |
-| `btcbot/venues/polymarket.py` | Polymarket adapter (Gamma + CLOB) |
-| `btcbot/fees.py` | Venue fee models (Kalshi formula vs Polymarket bps) |
-| `btcbot/markets.py` | Polymarket Gamma discovery, strike parsing |
-| `btcbot/clob.py` | Polymarket order book reads, order submission |
-| `btcbot/spot.py` | BTC spot feed (**see the oracle warning above**) |
+| `btcbot/venues/kalshi.py` | Kalshi REST, RSA auth, bid-only book handling, discovery, strike parsing |
+| `btcbot/fees.py` | Kalshi's taker-fee formula |
+| `btcbot/config.py` | Config load, asset families, per-asset strike bounds |
+| `btcbot/spot.py` | Per-asset spot feeds (**see the oracle warning above**) |
 | `btcbot/signals.py` | Fair-value model, book imbalance, implied probability |
 | `btcbot/strategies/` | `volume_threshold` (the video's rule), `edge_threshold` |
 | `btcbot/risk.py` | Sizing, fee-aware edge check, caps, kill switch |
 | `btcbot/portfolio.py` | Cash, positions, mark-to-market, P&L ledger, drawdown |
 | `btcbot/exits.py` | Stop loss, take profit, trailing stop, drawdown guard |
-| `btcbot/execution.py` | `PaperExecutor` / `BullpenExecutor` / `LiveExecutor` |
+| `btcbot/execution.py` | `PaperExecutor` / `LiveExecutor` |
 | `btcbot/backtest.py` | Replay + statistics |
 | `btcbot/simulate.py` | Synthetic no-edge control world |
 | `btcbot/runner.py` | Live loop |

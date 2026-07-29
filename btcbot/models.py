@@ -15,19 +15,22 @@ DOWN = "Down"
 
 @dataclass(frozen=True)
 class Market:
-    """A single Polymarket binary Up/Down window."""
+    """A single binary Up/Down window."""
 
     condition_id: str
     slug: str
     question: str
+    # Kalshi is single-token -- YES and NO are two sides of one market, so both
+    # of these are the ticker and the side is carried on the order. Retained
+    # because they are part of the recorded snapshot schema on disk.
     up_token_id: str
     down_token_id: str
     start_ts: float
     end_ts: float
     volume: float = 0.0
     liquidity: float = 0.0
-    # The "price to beat". Polymarket publishes this in the market text; we parse
-    # it best-effort, so it can be None. Never trade on a None strike.
+    # The "price to beat", read from floor_strike or the market text. Parsed
+    # best-effort, so it can be None. Never trade on a None strike.
     strike: Optional[float] = None
 
     def token_id(self, side: str) -> str:
@@ -161,13 +164,15 @@ class Position:
     avg_price: float
     fees_paid: float = 0.0
 
-    def payout(self, winning_side: Optional[str], winnings_fee_bps: float = 0.0) -> float:
-        """Gross USD returned at resolution. Each winning share pays $1."""
+    def payout(self, winning_side: Optional[str]) -> float:
+        """Gross USD returned at resolution. Each winning share pays $1.
+
+        No settlement fee is deducted: Kalshi charges its taker fee up front on
+        every fill, so by the time a contract resolves the fee is already paid.
+        """
         if winning_side is None:
             # Void / unresolvable window: assume stake returned.
             return self.shares * self.avg_price
         if winning_side != self.side:
             return 0.0
-        gross = self.shares * 1.0
-        profit = max(0.0, gross - self.shares * self.avg_price)
-        return gross - profit * (winnings_fee_bps / 10_000.0)
+        return self.shares * 1.0

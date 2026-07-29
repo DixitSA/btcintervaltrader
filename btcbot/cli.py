@@ -373,89 +373,6 @@ def _dump_raw(cfg, venue, markets, path: str) -> None:
     print("validated against real payloads (see tests/test_fixtures.py).")
 
 
-def cmd_verify_bullpen(args: argparse.Namespace) -> int:
-    """Check the configured Bullpen invocation without placing an order."""
-    import shutil
-    import subprocess
-
-    cfg = load_config(args.config)
-    bp = cfg.execution.bullpen
-
-    path = shutil.which(bp.binary)
-    if not path:
-        print(f"FAIL: '{bp.binary}' not found on PATH.", file=sys.stderr)
-        print("Install the Bullpen CLI, or set execution.bullpen.binary.", file=sys.stderr)
-        return 1
-    print(f"ok   binary: {path}")
-
-    try:
-        proc = subprocess.run(
-            bp.help_template, capture_output=True, text=True, timeout=bp.timeout_seconds
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        print(f"FAIL: could not run {bp.help_template}: {exc}", file=sys.stderr)
-        return 1
-
-    if proc.returncode != 0:
-        print(
-            f"FAIL: `{' '.join(bp.help_template)}` exited {proc.returncode}.\n"
-            f"{(proc.stderr or proc.stdout).strip()[:800]}",
-            file=sys.stderr,
-        )
-        print(
-            "\nThe subcommand path in execution.bullpen.help_template is probably "
-            "wrong. Fix it and buy_template to match your CLI.",
-            file=sys.stderr,
-        )
-        return 1
-
-    print(f"ok   `{' '.join(bp.help_template)}` succeeded")
-    help_text = (proc.stdout or "") + (proc.stderr or "")
-
-    # Render a sample order so the exact argv is visible before it is ever run.
-    sample = _render_sample(cfg)
-    print("\nThe bot would invoke:\n  " + " ".join(sample))
-
-    flags = {a for a in sample if a.startswith("--")}
-    missing = [f for f in sorted(flags) if f not in help_text]
-    if missing:
-        print(
-            "\nWARNING: these flags from buy_template do not appear in the help "
-            f"output: {', '.join(missing)}",
-            file=sys.stderr,
-        )
-        print("Update execution.bullpen.buy_template to match.", file=sys.stderr)
-        return 1
-
-    print("ok   every flag in buy_template appears in the help output")
-    print(
-        "\nNext: set execution.bullpen.dry_run=false, then place ONE "
-        "minimum-size order and confirm it in the Polymarket UI before "
-        "running unattended."
-    )
-    return 0
-
-
-def _render_sample(cfg) -> list[str]:
-    """Render buy_template with representative values, for display only."""
-    values = {
-        "token_id": "<TOKEN_ID>",
-        "side": "up",
-        "outcome": "Up",
-        "shares": "10.00",
-        "price": "0.520",
-        "slug": "btc-updown-15m-example",
-        "condition_id": "<CONDITION_ID>",
-    }
-    out = []
-    for part in cfg.execution.bullpen.buy_template:
-        try:
-            out.append(part.format(**values))
-        except KeyError as exc:
-            out.append(f"<BAD PLACEHOLDER {exc}>")
-    return out
-
-
 def cmd_calibrate(args: argparse.Namespace) -> int:
     """Inspect the calibration curve from past trade outcomes."""
     from .learner import Calibrator, OutcomeStore
@@ -863,11 +780,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="save raw API responses to PATH so parsers can be validated offline",
     )
     p_vv.set_defaults(func=cmd_verify_venue)
-
-    p_vb = sub.add_parser(
-        "verify-bullpen", help="check the configured Bullpen CLI invocation (places no order)"
-    )
-    p_vb.set_defaults(func=cmd_verify_bullpen)
 
     p_sim = sub.add_parser("simulate", help="generate a synthetic no-edge control dataset")
     p_sim.add_argument("--data-dir", default=None)

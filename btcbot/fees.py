@@ -1,19 +1,19 @@
-"""Fee models.
+"""Fee model.
 
 Fees are not a detail here -- on a near-coin-flip they are most of the reason
-the game is negative sum, and Kalshi's and Polymarket's schedules are shaped so
-differently that a strategy tuned on one can be nonsense on the other.
+the game is negative sum.
 
-Polymarket: no taker fee historically, a percentage of PROFIT at settlement.
-Kalshi:     a taker fee charged UP FRONT on every fill, following
+Kalshi charges a taker fee UP FRONT on every fill, following
 
-                fee = ceil(0.07 * C * P * (1 - P) * 100) / 100
+    fee = ceil(0.07 * C * P * (1 - P) * 100) / 100
 
-            where C is contracts and P the price in dollars. That peaks at
-            1.75c per contract at P = 0.50 -- i.e. 3.5% of a 50c stake, paid
-            on entry, and again on exit if you stop out. It falls away toward
-            the extremes, which is why cheap longshots look deceptively cheap
-            to trade.
+where C is contracts and P the price in dollars. That peaks at 1.75c per
+contract at P = 0.50 -- i.e. 3.5% of a 50c stake, paid on entry, and again on
+exit if you stop out. It falls away toward the extremes, which is why cheap
+longshots look deceptively cheap to trade.
+
+The FeeModel protocol is kept so the risk layer depends on an interface rather
+than on Kalshi's schedule directly: these are venue policy and they change.
 """
 
 from __future__ import annotations
@@ -34,32 +34,6 @@ class FeeModel(Protocol):
     def round_trip_cost(self, shares: float, price: float) -> float:
         """Total fee burden assumed when deciding whether an edge survives."""
         ...
-
-
-class PolymarketFees:
-    name = "polymarket"
-
-    def __init__(self, taker_fee_bps: float = 0.0, winnings_fee_bps: float = 200.0):
-        self.taker_fee_bps = taker_fee_bps
-        self.winnings_fee_bps = winnings_fee_bps
-
-    def entry_fee(self, shares: float, price: float) -> float:
-        return shares * price * (self.taker_fee_bps / 10_000.0)
-
-    def exit_fee(self, shares: float, price: float) -> float:
-        return shares * price * (self.taker_fee_bps / 10_000.0)
-
-    def settlement_fee(self, shares: float, entry_price: float, won: bool) -> float:
-        if not won:
-            return 0.0
-        profit = max(0.0, shares * (1.0 - entry_price))
-        return profit * (self.winnings_fee_bps / 10_000.0)
-
-    def round_trip_cost(self, shares: float, price: float) -> float:
-        expected_profit = shares * (1.0 - price)
-        return self.entry_fee(shares, price) + expected_profit * (
-            self.winnings_fee_bps / 10_000.0
-        )
 
 
 class KalshiFees:
@@ -116,12 +90,9 @@ class KalshiFees:
 
 
 def build_fee_model(venue: str, cfg) -> FeeModel:
-    if venue == "kalshi":
-        return KalshiFees(
-            taker_coefficient=getattr(cfg, "kalshi_taker_coefficient", 0.07),
-            maker_coefficient=getattr(cfg, "kalshi_maker_coefficient", 0.0),
-        )
-    return PolymarketFees(
-        taker_fee_bps=cfg.taker_fee_bps,
-        winnings_fee_bps=cfg.winnings_fee_bps,
+    if venue != "kalshi":
+        raise RuntimeError(f"no fee model for venue: {venue}")
+    return KalshiFees(
+        taker_coefficient=getattr(cfg, "kalshi_taker_coefficient", 0.07),
+        maker_coefficient=getattr(cfg, "kalshi_maker_coefficient", 0.0),
     )

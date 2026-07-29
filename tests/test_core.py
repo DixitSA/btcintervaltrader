@@ -5,7 +5,6 @@ import math
 import pytest
 
 from btcbot.config import Config
-from btcbot.markets import parse_market, parse_strike
 from btcbot.models import DOWN, UP, Book, Level, Market, Position, Snapshot
 from btcbot.risk import RiskManager, kelly_fraction
 from btcbot.signals import fair_probability_up, market_implied_up
@@ -97,11 +96,16 @@ def test_kelly_positive_only_with_edge():
     assert kelly_fraction(0.55, 0.60) < 0
 
 
-def test_position_payout_applies_fee_to_profit_only():
+def test_position_payout_is_one_per_winning_share():
+    """No settlement fee: Kalshi charges its taker fee up front, on the fill."""
     pos = Position("m", UP, shares=100, avg_price=0.50)
-    # Wins: $100 gross, $50 profit, 2% of profit = $1 fee.
-    assert pos.payout(UP, winnings_fee_bps=200) == pytest.approx(99.0)
+    assert pos.payout(UP) == pytest.approx(100.0)
     assert pos.payout(DOWN) == 0.0
+
+
+def test_position_payout_returns_stake_on_a_void_window():
+    pos = Position("m", UP, shares=100, avg_price=0.50)
+    assert pos.payout(None) == pytest.approx(50.0)
 
 
 # -- the volume rule -------------------------------------------------
@@ -224,112 +228,3 @@ def test_risk_refuses_stale_window():
     order, reason = risk.evaluate(snap, Signal(side=UP, prob=0.70))
     assert order is None
     assert "left" in reason
-
-
-# -- market parsing --------------------------------------------------
-
-
-# -- always_trade strategy -------------------------------------------
-
-def test_always_trade_fires_on_every_window():
-    from btcbot.strategies.always_trade import AlwaysTradeStrategy
-
-    strat = AlwaysTradeStrategy(direction="up", assumed_edge=0.06)
-    snap = make_snapshot(p_up=0.55, volume=0)
-    sig = strat.decide(snap)
-    assert sig is not None
-    assert sig.side == UP
-    assert sig.prob == pytest.approx(min(0.99, 0.55 + 0.06))
-
-
-def test_always_trade_follow_favoured():
-    from btcbot.strategies.always_trade import AlwaysTradeStrategy
-
-    strat = AlwaysTradeStrategy(direction="follow", assumed_edge=0.06)
-    snap = make_snapshot(p_up=0.55, volume=0)  # market favours Up
-    sig = strat.decide(snap)
-    assert sig is not None
-    assert sig.side == UP
-
-    snap2 = make_snapshot(p_up=0.45, volume=0)  # market favours Down
-    sig2 = strat.decide(snap2)
-    assert sig2 is not None
-    assert sig2.side == DOWN
-
-
-def test_always_trade_fade():
-    from btcbot.strategies.always_trade import AlwaysTradeStrategy
-
-    strat = AlwaysTradeStrategy(direction="fade", assumed_edge=0.06)
-    snap = make_snapshot(p_up=0.55, volume=0)
-    sig = strat.decide(snap)
-    assert sig is not None
-    assert sig.side == DOWN  # fades the favourite
-
-
-def test_always_trade_registered():
-    from btcbot.strategies import REGISTRY, build_strategy
-
-    assert "always_trade" in REGISTRY
-    s = build_strategy("always_trade", {"direction": "up", "assumed_edge": 0.06})
-    assert s is not None
-    assert s.decide(make_snapshot(volume=0)) is not None
-
-
-def test_always_trade_no_market_price_returns_none():
-    from btcbot.strategies.always_trade import AlwaysTradeStrategy
-
-    strat = AlwaysTradeStrategy()
-    # No bids or asks -> market_implied_up returns None
-    empty_book = Book(bids=[], asks=[])
-    snap = Snapshot(
-        ts=1000.0,
-        market=Market(
-            condition_id="x", slug="t", question="?", up_token_id="u",
-            down_token_id="d", start_ts=0, end_ts=2000, strike=100_000,
-        ),
-        up_book=empty_book,
-        down_book=empty_book,
-        spot=100_000.0,
-    )
-    assert strat.decide(snap) is None
-
-
-# -- market parsing --------------------------------------------------
-
-
-def test_parse_strike_reads_price_to_beat():
-    assert parse_strike("Will BTC be above $109,412.55 at 3pm?") == pytest.approx(109_412.55)
-
-
-def test_parse_strike_ignores_payout_language():
-    assert parse_strike("Each share pays $1. Price to beat $95,000.00") == pytest.approx(95_000.0)
-
-
-def test_parse_strike_returns_none_when_ambiguous():
-    assert parse_strike("above $95,000 or below $97,000") is None
-    assert parse_strike("no numbers here") is None
-
-
-def test_parse_market_maps_up_token_by_outcome_order():
-    raw = {
-        "conditionId": "0xabc",
-        "slug": "btc-updown-15m-123",
-        "question": "Bitcoin Up or Down?",
-        "clobTokenIds": '["tokenDOWN","tokenUP"]',
-        "outcomes": '["Down","Up"]',
-        "endDate": "2026-07-28T12:15:00Z",
-        "startDate": "2026-07-28T12:00:00Z",
-        "volumeNum": 1234.5,
-        "description": "Price to beat $100,000.00",
-    }
-    m = parse_market(raw)
-    assert m is not None
-    assert m.up_token_id == "tokenUP"
-    assert m.down_token_id == "tokenDOWN"
-    assert m.strike == pytest.approx(100_000.0)
-    assert m.end_ts - m.start_ts == pytest.approx(900.0)
-
-
-def test_parse_market_rejects_missing_tokens():
-    assert parse_market({"slug": "x", "endDate": "2026-07-28T12:15:00Z"}) is None

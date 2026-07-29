@@ -47,7 +47,7 @@ class RiskManager:
         fees: FeeConfig,
         markets: MarketsConfig,
         fee_model=None,
-        venue: str = "polymarket",
+        venue: str = "kalshi",
     ):
         self.cfg = risk
         self.fees = fees
@@ -125,8 +125,8 @@ class RiskManager:
         if entry < self.cfg.min_entry_price:
             return None, f"entry {entry:.3f} below min_entry_price"
 
-        # Edge must survive fees. The fee model is venue-specific: Polymarket
-        # charges on profit at settlement, Kalshi charges up front per fill.
+        # Edge must survive fees. Kalshi charges up front per fill, so the cost
+        # is real whether or not the position ever turns a profit.
         gross_edge = signal.prob - entry
 
         # Estimate the per-share fee at a realistic order size. Kalshi rounds

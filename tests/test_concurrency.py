@@ -12,7 +12,6 @@ import pytest
 
 from btcbot.backtest import run_backtest
 from btcbot.config import Config
-from btcbot.markets import GammaClient
 from btcbot.models import UP
 from btcbot.portfolio import Portfolio
 from btcbot.recorder import load_dataset
@@ -64,38 +63,6 @@ def test_simulator_emits_overlapping_families(multi_snapshots):
     spans = {f: (min(v), max(v)) for f, v in by_family.items()}
     a, b = spans[FAMILIES[0]], spans[FAMILIES[1]]
     assert a[0] < b[1] and b[0] < a[1], "families do not overlap in time"
-
-
-def test_gamma_filters_on_any_prefix():
-    raws = [
-        {
-            "slug": f"{fam}-1",
-            "conditionId": "0x1",
-            "question": "q",
-            "clobTokenIds": '["a","b"]',
-            "outcomes": '["Up","Down"]',
-            "endDate": "2026-07-28T12:15:00Z",
-        }
-        for fam in FAMILIES + ["doge-updown-1h"]
-    ]
-
-    class FakeResp:
-        status_code = 200
-
-        def raise_for_status(self):
-            pass
-
-        def json(self):
-            return raws
-
-    client = GammaClient()
-    client._http = type("H", (), {"get": lambda self, *a, **k: FakeResp()})()
-    found = client.fetch_open_markets(FAMILIES)
-    assert len(found) == 3
-    assert all(any(m.slug.startswith(f) for f in FAMILIES) for m in found)
-
-    single = client.fetch_open_markets("btc-updown-15m")
-    assert len(single) == 1
 
 
 # -- exposure cap ----------------------------------------------------

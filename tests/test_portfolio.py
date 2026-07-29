@@ -45,16 +45,26 @@ def test_open_refuses_duplicate_position():
         p.open("m", UP, shares=10, price=0.50, ts=1.0)
 
 
-def test_settle_win_pays_one_per_share_less_fee():
+def test_settle_win_pays_one_per_share():
     p = Portfolio(100.0)
     p.open("m", UP, shares=50, price=0.60, ts=0.0)
-    trade = p.settle("m", UP, ts=900.0, winnings_fee_bps=200)
+    trade = p.settle("m", UP, ts=900.0)
 
-    # $50 gross, $20 profit, 2% of profit = $0.40 fee.
-    assert p.cash == pytest.approx(70.0 + 49.60)
-    assert trade.pnl == pytest.approx(19.60)
+    # $30 stake left $70 cash; 50 winning shares pay $50, no settlement fee.
+    assert p.cash == pytest.approx(70.0 + 50.0)
+    assert trade.pnl == pytest.approx(20.0)
     assert trade.exit_reason == EXIT_EXPIRY
     assert trade.won
+
+
+def test_settle_routes_settlement_fee_through_the_fee_model():
+    """Kalshi's is zero, but the hook must actually be wired."""
+    from btcbot.fees import KalshiFees
+
+    p = Portfolio(100.0)
+    p.open("m", UP, shares=50, price=0.60, ts=0.0)
+    trade = p.settle("m", UP, ts=900.0, fee_model=KalshiFees())
+    assert trade.pnl == pytest.approx(20.0)
 
 
 def test_settle_loss_is_a_total_loss_of_stake():

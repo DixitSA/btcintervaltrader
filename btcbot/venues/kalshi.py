@@ -1,7 +1,6 @@
 """Kalshi venue adapter.
 
-Two things about Kalshi differ from Polymarket in ways that will silently
-corrupt results if you get them wrong:
+Two things about Kalshi will silently corrupt results if you get them wrong:
 
 1. THE ORDERBOOK CONTAINS ONLY BIDS. The `yes` and `no` arrays are both resting
    bids. There is no ask side. A bid for YES at 42c is the same object as an

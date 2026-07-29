@@ -13,7 +13,7 @@ import math
 import pytest
 
 from btcbot.config import Config, FeeConfig
-from btcbot.fees import KalshiFees, PolymarketFees, build_fee_model
+from btcbot.fees import KalshiFees, build_fee_model
 from btcbot.models import DOWN, UP
 from btcbot.venues.kalshi import (
     KalshiVenue,
@@ -316,28 +316,19 @@ def test_kalshi_fee_is_zero_for_no_shares():
     assert KalshiFees().entry_fee(0, 0.5) == 0.0
 
 
-def test_polymarket_charges_on_profit_not_entry():
-    fees = PolymarketFees(taker_fee_bps=0.0, winnings_fee_bps=200.0)
-    assert fees.entry_fee(100, 0.50) == 0.0
-    # Win: $50 profit, 2% = $1.
-    assert fees.settlement_fee(100, 0.50, won=True) == pytest.approx(1.0)
-    assert fees.settlement_fee(100, 0.50, won=False) == 0.0
-
-
-def test_kalshi_entry_cost_dwarfs_polymarket_at_the_money():
-    """The reason a strategy tuned on one venue can be nonsense on the other."""
+def test_kalshi_entry_cost_at_the_money_is_35_bps_of_notional():
+    """The headline cost: paid up front, at its worst on a coin flip."""
     shares, price = 100, 0.50
-    kalshi = KalshiFees().entry_fee(shares, price)
-    poly = PolymarketFees().entry_fee(shares, price)
-    assert kalshi > poly
-    # 1.75c/contract on a 50c stake is 3.5% of notional, paid up front.
-    assert kalshi / (shares * price) == pytest.approx(0.035, abs=1e-3)
+    entry = KalshiFees().entry_fee(shares, price)
+    # 1.75c/contract on a 50c stake is 3.5% of notional, paid on entry.
+    assert entry / (shares * price) == pytest.approx(0.035, abs=1e-3)
 
 
-def test_build_fee_model_selects_by_venue():
+def test_build_fee_model_rejects_unknown_venue():
     cfg = FeeConfig()
     assert isinstance(build_fee_model("kalshi", cfg), KalshiFees)
-    assert isinstance(build_fee_model("polymarket", cfg), PolymarketFees)
+    with pytest.raises(RuntimeError, match="no fee model"):
+        build_fee_model("polymarket", cfg)
 
 
 def test_default_config_venue_is_kalshi():
