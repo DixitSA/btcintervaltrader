@@ -454,6 +454,48 @@ def _render_sample(cfg) -> list[str]:
     return out
 
 
+def cmd_calibrate(args: argparse.Namespace) -> int:
+    """Inspect the calibration curve from past trade outcomes."""
+    from .learner import Calibrator, OutcomeStore
+
+    cfg = load_config(args.config)
+    data_dir = Path(args.data_dir or cfg.data_dir)
+    outcome_path = data_dir / (cfg.learning.outcome_file or "outcomes.jsonl")
+
+    if not outcome_path.exists():
+        print(f"No outcome file found at {outcome_path}.", file=sys.stderr)
+        print("Run paper trading with learning enabled to accumulate outcomes.", file=sys.stderr)
+        return 1
+
+    calibrator = Calibrator(
+        alpha_prior=cfg.learning.alpha_prior,
+        beta_prior=cfg.learning.beta_prior,
+    )
+    store = OutcomeStore(outcome_path)
+    n = store.feed(calibrator)
+    if n == 0:
+        print(f"'{outcome_path}' exists but is empty. No trades to calibrate from.")
+        return 0
+
+    print(f"\nCalibration from {n} settled trades")
+    print(f"Beta({calibrator.alpha_prior}, {calibrator.beta_prior}) prior")
+    print("-" * 60)
+    print(f"{'bucket':>7}  {'n':>5}  {'wins':>5}  {'raw':>5}  {'calibrated':>10}  {'delta':>8}")
+    print("-" * 60)
+    for row in calibrator.table:
+        delta = row["calibrated"] - row["raw_mid"]
+        print(
+            f"{row['bucket']:>7.2f}  {row['n']:>5}  {row['wins']:>5}  "
+            f"{row['raw_mid']:>5.2f}  {row['calibrated']:>10.4f}  {delta:>+8.4f}"
+        )
+    print("-" * 60)
+    print("Delta = calibrated - raw. Positive means the strategy beats its own")
+    print("probability estimate in this bucket; negative means it overestimates.")
+    print("With < ~100 trades per bucket, the posterior is dominated by the prior")
+    print("and deltas will be small.")
+    return 0
+
+
 def cmd_paper(args: argparse.Namespace) -> int:
     from .runner import Runner
 
@@ -462,6 +504,8 @@ def cmd_paper(args: argparse.Namespace) -> int:
     strategy = build_strategy(args.strategy or cfg.strategy.name, cfg.strategy.params)
     runner = Runner(cfg, strategy=strategy, record=True, trade=True)
     runner.run(max_ticks=args.max_ticks)
+    if args.report and runner.portfolio is not None:
+        print(runner.portfolio.log_trades())
     return 0
 
 
@@ -572,9 +616,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_srv.add_argument("--port", type=int, default=8787)
     p_srv.set_defaults(func=cmd_serve)
 
+    p_cal = sub.add_parser("calibrate", help="inspect calibration curve from past trade outcomes")
+    p_cal.add_argument("--data-dir", default=None)
+    p_cal.set_defaults(func=cmd_calibrate)
+
     p_pa = sub.add_parser("paper", help="trade with simulated money against live books")
     p_pa.add_argument("--strategy", choices=sorted(REGISTRY), default=None)
     p_pa.add_argument("--max-ticks", type=int, default=None)
+    p_pa.add_argument("--report", action="store_true", help="print detailed trade log")
     p_pa.set_defaults(func=cmd_paper)
 
     p_li = sub.add_parser("live", help="trade with REAL money (requires opt-in env var)")

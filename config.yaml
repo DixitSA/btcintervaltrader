@@ -125,6 +125,15 @@ execution:
     # Logs the command instead of running it. Leave true until verified.
     dry_run: true
 
+learning:
+  # Online calibration from observed trade outcomes.
+  # Disabled by default. Enable after accumulating at least ~100 settled trades —
+  # with fewer data points the posterior barely moves from the prior.
+  enabled: false
+  alpha_prior: 1.0
+  beta_prior: 1.0
+  outcome_file: outcomes.jsonl
+
 strategy:
   name: volume_threshold
   params:
