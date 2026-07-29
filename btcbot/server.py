@@ -32,6 +32,10 @@ log = logging.getLogger(__name__)
 
 UI_PATH = Path(__file__).resolve().parent / "ui" / "index.html"
 
+# Most recent settled trades included in /api/state. The panel polls every 2s,
+# so the whole ledger would grow the payload without bound over a long session.
+MAX_TRADES_IN_STATE = 100
+
 
 def seed_spot_history(spot_feed, data_dir: str, tail_bytes: int = 2_000_000) -> int:
     """Preload the spot feed from snapshots already on disk.
@@ -309,7 +313,37 @@ class PaperSession:
                 }
             )
         wins = sum(1 for t in p.closed if t.won)
+        # Full ledger of settled trades, newest first. Capped so a long session
+        # cannot grow the /api/state payload without bound -- the panel polls
+        # this every 2s.
+        trades = []
+        for t in reversed(p.closed[-MAX_TRADES_IN_STATE:]):
+            cost = t.shares * t.entry_price
+            trades.append(
+                {
+                    "slug": t.slug,
+                    "side": t.side,
+                    "shares": t.shares,
+                    "entry_price": t.entry_price,
+                    "exit_price": t.exit_price,
+                    "entry_ts": t.entry_ts,
+                    "exit_ts": t.exit_ts,
+                    "held_seconds": t.held_seconds,
+                    "pnl": t.pnl,
+                    "fees_paid": t.fees_paid,
+                    "exit_reason": t.exit_reason,
+                    "outcome": t.outcome,
+                    "won": t.won,
+                    "cost_basis": cost,
+                    # Return on what the trade actually tied up. A $0.40 win on
+                    # a $0.50 stake is a different animal from the same $0.40 on
+                    # a $5 stake, and the raw P&L column hides that.
+                    "return_pct": (t.pnl / cost) if cost else None,
+                }
+            )
         return {
+            "trades": trades,
+            "trades_truncated": max(0, len(p.closed) - MAX_TRADES_IN_STATE),
             "active": True,
             "equity": p.equity,
             "cash": getattr(p, "cash", None),

@@ -6,21 +6,21 @@
   panel.id = PANEL_ID;
   panel.innerHTML = `
     <div class="bb-head">
-      <span class="bb-dot" id="bb-dot"></span>
+      <span class="bb-dot" id="bb-dot" aria-hidden="true"></span>
       <span class="bb-title">btcbot</span>
       <span class="bb-grow"></span>
       <span class="bb-vol" id="bb-vol">—</span>
-      <button class="bb-min" id="bb-min" title="collapse">–</button>
+      <button class="bb-min" id="bb-min" aria-label="Collapse panel">–</button>
     </div>
     <div class="bb-body" id="bb-body">
-      <div class="bb-msg" id="bb-msg">connecting…</div>
-      <div class="bb-tabs" id="bb-tabs" style="display:none">
-        <button class="bb-tab bb-tab-active" data-tab="paper">Paper</button>
-        <button class="bb-tab" data-tab="live">Live</button>
+      <div class="bb-msg" id="bb-msg" role="status">connecting…</div>
+      <div class="bb-tabs" id="bb-tabs" style="display:none" role="tablist">
+        <button class="bb-tab bb-tab-active" data-tab="paper" role="tab" aria-selected="true" aria-controls="bb-paper-panel">Paper</button>
+        <button class="bb-tab" data-tab="live" role="tab" aria-selected="false" aria-controls="bb-live-panel">Live</button>
       </div>
-      <div id="bb-paper-panel"></div>
-      <div id="bb-live-panel" style="display:none"></div>
-      <div id="bb-markets"></div>
+      <div id="bb-paper-panel" role="tabpanel" aria-live="polite"></div>
+      <div id="bb-live-panel" style="display:none" role="tabpanel" aria-live="polite"></div>
+      <div id="bb-markets" aria-live="polite"></div>
       <div class="bb-foot">read-only · places no orders</div>
     </div>`;
   document.documentElement.appendChild(panel);
@@ -37,8 +37,12 @@
   document.getElementById("bb-tabs").addEventListener("click", (e) => {
     const tab = e.target.closest(".bb-tab");
     if (!tab) return;
-    document.querySelectorAll(".bb-tab").forEach((t) => t.classList.remove("bb-tab-active"));
+    document.querySelectorAll(".bb-tab").forEach((t) => {
+      t.classList.remove("bb-tab-active");
+      t.setAttribute("aria-selected", "false");
+    });
     tab.classList.add("bb-tab-active");
+    tab.setAttribute("aria-selected", "true");
     const tt = tab.dataset.tab;
     document.getElementById("bb-paper-panel").style.display = tt === "paper" ? "" : "none";
     document.getElementById("bb-live-panel").style.display = tt === "live" ? "" : "none";
@@ -88,6 +92,71 @@
     });
   }
 
+  const clockTime = (ts) => (ts == null ? "—"
+    : new Date(ts * 1000).toLocaleTimeString(undefined, { hour12: false }));
+  const heldStr = (s) => {
+    if (s == null) return "—";
+    s = Math.round(s);
+    return s < 60 ? s + "s" : Math.floor(s / 60) + "m" + String(s % 60).padStart(2, "0") + "s";
+  };
+
+  // Trade history, newest first. The overlay is narrow, so each trade gets two
+  // lines rather than a wide table: the verdict and money on top, the mechanics
+  // underneath. Every field the panel shows is here too.
+  function tradeHistoryHtml(trades, truncated) {
+    if (!trades || !trades.length) {
+      return `<div class="bb-section-label">Trade history</div>
+        <div class="bb-dim" style="padding:4px 0">no closed trades yet</div>`;
+    }
+    const wins = trades.filter((t) => t.won).length;
+    const net = trades.reduce((a, t) => a + t.pnl, 0);
+    const netCls = net > 0 ? "bb-up" : net < 0 ? "bb-down" : "";
+
+    let html = `<div class="bb-section-label">Trade history</div>
+      <div class="bb-trade-summary">
+        <span>${trades.length} closed</span>
+        <span class="bb-up">${wins}W</span>
+        <span class="bb-down">${trades.length - wins}L</span>
+        <span class="bb-dim">${((wins / trades.length) * 100).toFixed(0)}%</span>
+        <span class="bb-grow"></span>
+        <span class="${netCls}">net ${usd(net)}</span>
+      </div>
+      <div class="bb-trade-list">`;
+
+    for (const t of trades) {
+      const cls = t.won ? "bb-up" : "bb-down";
+      const ret = t.return_pct == null ? "—" : (t.return_pct * 100).toFixed(1) + "%";
+      // Avoid "settled · settled Up" when the reason is already the settlement.
+      const reason = !t.outcome ? t.exit_reason
+        : t.exit_reason === "settled" ? `settled ${t.outcome}`
+        : `${t.exit_reason} · settled ${t.outcome}`;
+      html += `<div class="bb-trade">
+        <div class="bb-trade-top">
+          <span class="${cls} bb-trade-badge">${t.won ? "WON" : "LOST"}</span>
+          <span class="bb-trade-side">${t.side}</span>
+          <span class="bb-grow"></span>
+          <span class="${cls} bb-trade-pnl">${usd(t.pnl)}</span>
+          <span class="${cls} bb-dim">${ret}</span>
+        </div>
+        <div class="bb-trade-mid">
+          ${t.entry_price.toFixed(3)} → ${t.exit_price.toFixed(3)}
+          · ${t.shares.toFixed(1)} sh · stake ${usd(t.cost_basis)}
+          · fees ${usd(t.fees_paid)}
+        </div>
+        <div class="bb-trade-bot">
+          ${clockTime(t.exit_ts)} · held ${heldStr(t.held_seconds)} · ${reason}
+        </div>
+        <div class="bb-trade-slug">${t.slug}</div>
+      </div>`;
+    }
+    html += `</div>`;
+    if (truncated) {
+      html += `<div class="bb-dim" style="font-size:9px;padding:2px 0">
+        showing ${trades.length} most recent of ${trades.length + truncated}</div>`;
+    }
+    return html;
+  }
+
   function renderPortfolio(p, mode) {
     const paperPanel = document.getElementById("bb-paper-panel");
     const livePanel = document.getElementById("bb-live-panel");
@@ -124,6 +193,7 @@
         <span class="bb-dim">${p.active ? "running" : "idle"}</span>
         <span class="bb-grow"></span>
       </div>
+      ${tradeHistoryHtml(p.trades, p.trades_truncated)}
       <div id="bb-shadow-section"></div>`);
 
     renderLivePanel(livePanel, p, mode);
@@ -175,8 +245,8 @@
     if (existingBtn) existingBtn.remove();
     paperPanel.insertAdjacentHTML("beforeend",
       running
-        ? `<button class="bb-btn bb-btn-stop" id="bb-stop">stop paper</button>`
-        : `<button class="bb-btn bb-btn-start" id="bb-start">start paper</button>`
+        ? `<button class="bb-btn bb-btn-stop" id="bb-stop" aria-label="Stop paper trading">stop paper</button>`
+        : `<button class="bb-btn bb-btn-start" id="bb-start" aria-label="Start paper trading">start paper</button>`
     );
     const startBtn = document.getElementById("bb-start");
     const stopBtn = document.getElementById("bb-stop");
@@ -394,7 +464,9 @@
   }
 
   function renderError(msg) {
-    document.getElementById("bb-dot").className = "bb-dot bb-bad";
+    const dot = document.getElementById("bb-dot");
+    dot.className = "bb-dot bb-bad";
+    dot.setAttribute("aria-label", "Cannot connect to server");
     document.getElementById("bb-msg").textContent = msg;
     document.getElementById("bb-msg").style.display = "block";
     document.getElementById("bb-markets").innerHTML = "";
@@ -410,7 +482,10 @@
     }
 
     const s = res.state;
-    document.getElementById("bb-dot").className = "bb-dot " + (s.running ? "bb-live" : "bb-idle");
+    const dot = document.getElementById("bb-dot");
+    const dotStatus = s.running ? "bb-live" : "bb-idle";
+    dot.className = "bb-dot " + dotStatus;
+    dot.setAttribute("aria-label", s.running ? "Paper trading is running" : "Paper trading is idle");
     document.getElementById("bb-msg").style.display = "none";
 
     if (s.last_error) {

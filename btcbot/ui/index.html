@@ -170,6 +170,21 @@
   </div>
 
   <div class="card">
+    <h2>Trade history <span class="dim" id="trade-summary" style="text-transform:none;letter-spacing:0"></span></h2>
+    <div class="scroll">
+      <table>
+        <thead><tr>
+          <th>result</th><th>closed</th><th>market</th><th>side</th><th>shares</th>
+          <th>entry</th><th>exit</th><th>stake</th><th>P&amp;L</th><th>return</th>
+          <th>fees</th><th>held</th><th>exit reason</th>
+        </tr></thead>
+        <tbody id="trades"><tr><td colspan="13" class="dim">no closed trades yet</td></tr></tbody>
+      </table>
+    </div>
+    <div class="caveat" id="trades-note"></div>
+  </div>
+
+  <div class="card">
     <h2>Open windows</h2>
     <div class="scroll">
       <table>
@@ -390,6 +405,64 @@ async function refreshShadow() {
   renderShadow();
 }
 
+const clockTime = (ts) => {
+  if (ts == null) return "—";
+  const d = new Date(ts * 1000);
+  return d.toLocaleTimeString(undefined, { hour12: false });
+};
+const heldStr = (s) => {
+  if (s == null) return "—";
+  s = Math.round(s);
+  return s < 60 ? s + "s" : Math.floor(s / 60) + "m" + String(s % 60).padStart(2, "0") + "s";
+};
+
+function renderTrades(trades, truncated) {
+  const tb = $("trades");
+  if (!trades || !trades.length) {
+    setHTML(tb, '<tr><td colspan="13" class="dim">no closed trades yet</td></tr>');
+    setText($("trade-summary"), "");
+    setText($("trades-note"), "");
+    return;
+  }
+
+  const wins = trades.filter((t) => t.won).length;
+  const gross = trades.reduce((a, t) => a + t.pnl, 0);
+  const fees = trades.reduce((a, t) => a + (t.fees_paid || 0), 0);
+  setText($("trade-summary"),
+    `— ${trades.length} shown · ${wins}W / ${trades.length - wins}L`
+    + ` · ${((wins / trades.length) * 100).toFixed(0)}% · net ${usd(gross)} after ${usd(fees)} fees`);
+
+  setHTML(tb, trades.map((t) => {
+    const cls = t.won ? "up" : "down";
+    const badge = t.won ? "WON" : "LOST";
+    // outcome is the settled winning side; absent when a trade was exited
+    // early, in which case there is no settlement to compare against. Avoid
+    // "settled · settled Up" when the reason is already the settlement.
+    const reason = !t.outcome ? t.exit_reason
+      : t.exit_reason === "settled" ? `settled ${t.outcome}`
+      : `${t.exit_reason} · settled ${t.outcome}`;
+    return `<tr>
+      <td class="${cls}"><b>${badge}</b></td>
+      <td class="dim">${clockTime(t.exit_ts)}</td>
+      <td>${t.slug}</td>
+      <td>${t.side}</td>
+      <td class="dim">${t.shares.toFixed(1)}</td>
+      <td>${t.entry_price.toFixed(3)}</td>
+      <td>${t.exit_price.toFixed(3)}</td>
+      <td class="dim">${usd(t.cost_basis)}</td>
+      <td class="${cls}"><b>${usd(t.pnl)}</b></td>
+      <td class="${cls}">${t.return_pct == null ? "—" : (t.return_pct * 100).toFixed(1) + "%"}</td>
+      <td class="dim">${usd(t.fees_paid)}</td>
+      <td class="dim">${heldStr(t.held_seconds)}</td>
+      <td class="dim">${reason}</td>
+    </tr>`;
+  }).join(""));
+
+  setText($("trades-note"), truncated
+    ? `Showing the ${trades.length} most recent of ${trades.length + truncated} closed trades.`
+    : "");
+}
+
 function renderMarkets(rows) {
   const tb = $("markets");
   if (!rows || !rows.length) {
@@ -490,6 +563,7 @@ async function refresh() {
     + ` · need ~${num(r.windows_needed_5pct)} for a 5% edge`);
   $("snapbar").style.width = Math.min(100, 100 * windows / (r.windows_needed_5pct || 1)) + "%";
 
+  renderTrades(p.trades, p.trades_truncated);
   renderMarkets(s.markets);
   setText($("log"), (s.log || []).join("\n") || "—");
 }
