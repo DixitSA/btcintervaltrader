@@ -135,10 +135,19 @@ learning:
   outcome_file: outcomes.jsonl
 
 strategy:
-  name: volume_threshold
+  # SIMULATION DEFAULT. always_trade places one bet per window with no volume
+  # gate and no edge gate, so `python -m btcbot paper` actually fills, settles,
+  # and produces a P&L curve. That is the point: exercise the whole pipeline.
+  #
+  # assumed_edge is a PLACEHOLDER, not a measured edge. It exists so the risk
+  # layer's "edge must survive fees" check passes (spread + Kalshi taker fee
+  # eat ~4-5c round trip on a coin flip). Simulated P&L from this config tells
+  # you the pipeline works; it does NOT tell you the strategy makes money.
+  #
+  # For the honest no-edge default (declines everything, by design):
+  #   name: volume_threshold
+  #   params: {min_volume_usd: 500000, direction: follow, assumed_edge: 0.0}
+  name: always_trade
   params:
-    min_volume_usd: 500000
     direction: follow
-    # 0.0 means "this rule is no better than the market price", which is the
-    # honest default. Raise it only if your own backtest justifies it.
-    assumed_edge: 0.0
+    assumed_edge: 0.06
