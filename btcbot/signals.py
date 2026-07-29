@@ -60,10 +60,20 @@ def realized_vol_from_series(
         return None
 
     cutoff = pts_all[-1][0] - lookback_seconds
-    prices = [px for ts, px in pts_all if ts >= cutoff and px > 0]
-    if len(prices) < 3:
+    kept = [(ts, px) for ts, px in pts_all if ts >= cutoff and px > 0]
+    if len(kept) < 3:
         return None
 
+    # The points may not actually SPAN the lookback -- during warmup there are
+    # only a few seconds of history. Scaling that to the full window as though
+    # it did understates vol by sqrt(lookback/span), which for 60s of history
+    # against a 900s window is a factor of ~3.9. Refuse rather than return a
+    # number that is wrong by multiples.
+    span = kept[-1][0] - kept[0][0]
+    if span < 0.5 * lookback_seconds:
+        return None
+
+    prices = [px for _, px in kept]
     rets = [math.log(cur / prev) for prev, cur in zip(prices, prices[1:])]
     if len(rets) < 2:
         return None
@@ -72,7 +82,12 @@ def realized_vol_from_series(
     var = sum((r - mean) ** 2 for r in rets) / (len(rets) - 1)
     if var <= 0:
         return None
-    return var**0.5 * (len(rets) ** 0.5)
+
+    # Volatility over the span actually covered, then rescaled to the window
+    # that was asked for. sqrt-of-time, so any residual gap is corrected
+    # rather than silently absorbed.
+    vol_over_span = var**0.5 * (len(rets) ** 0.5)
+    return vol_over_span * math.sqrt(lookback_seconds / span)
 
 
 def annualize(window_vol: float, window_seconds: float) -> Optional[float]:

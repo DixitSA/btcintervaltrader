@@ -465,6 +465,21 @@ def cmd_paper(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_serve(args: argparse.Namespace) -> int:
+    """Local control panel. Paper only -- it cannot place a real order."""
+    from .server import serve
+
+    cfg = load_config(args.config)
+    if cfg.is_live:
+        print(
+            "config has mode=live. `serve` is a paper-only panel and will not "
+            "run against live settings.\nSet mode: paper in config.yaml.",
+            file=sys.stderr,
+        )
+        return 1
+    return serve(cfg, host=args.host, port=args.port)
+
+
 def cmd_live(args: argparse.Namespace) -> int:
     from .runner import Runner
 
@@ -549,6 +564,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="slug prefixes to simulate; more than one produces overlapping windows",
     )
     p_sim.set_defaults(func=cmd_simulate)
+
+    p_srv = sub.add_parser(
+        "serve", help="local paper-trading control panel in your browser"
+    )
+    p_srv.add_argument("--host", default="127.0.0.1")
+    p_srv.add_argument("--port", type=int, default=8787)
+    p_srv.set_defaults(func=cmd_serve)
 
     p_pa = sub.add_parser("paper", help="trade with simulated money against live books")
     p_pa.add_argument("--strategy", choices=sorted(REGISTRY), default=None)

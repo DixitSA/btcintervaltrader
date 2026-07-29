@@ -76,6 +76,37 @@ def test_a_mismatched_window_is_badly_wrong():
     assert wrong == pytest.approx(right / math.sqrt(10.0), rel=1e-9)
 
 
+def test_partial_history_is_refused_not_extrapolated():
+    """Warmup must not masquerade as a measurement.
+
+    With only a minute of history, treating it as though it spanned the full
+    lookback understates vol by sqrt(lookback/span) -- a factor of ~3.9 for
+    60s against 900s. That is the same mismatched-window error as above,
+    arriving through the back door while the feed is still filling up.
+    """
+    points = _gbm(0.60, n=31, dt=2.0)  # 60 seconds of history
+    assert realized_vol_from_series(points, 900.0) is None
+
+    # Once enough of the window is covered it reports again.
+    plenty = _gbm(0.60, n=460, dt=2.0)  # ~918 seconds
+    assert realized_vol_from_series(plenty, 900.0) is not None
+
+
+def test_partial_but_sufficient_history_is_rescaled_not_understated():
+    """Covering 60% of the window must not report 60%-of-window vol."""
+    full = _gbm(0.60, n=460, dt=2.0, seed=5)
+    partial = full[-280:]  # ~558s, above the 50% floor
+
+    v_full = realized_vol_from_series(full, 900.0)
+    v_part = realized_vol_from_series(partial, 900.0)
+    assert v_full is not None and v_part is not None
+
+    # Both are estimates of the same 900s volatility, so they should be in the
+    # same ballpark -- not off by the sqrt(900/558) = 1.27 the naive version
+    # would introduce.
+    assert 0.6 < (v_part / v_full) < 1.6
+
+
 def test_duplicate_timestamps_do_not_bias_the_estimate():
     """Concurrent markets share one spot, so points can arrive duplicated.
 
