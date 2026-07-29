@@ -269,7 +269,9 @@ def cmd_verify_venue(args: argparse.Namespace) -> int:
         )
 
     try:
-        markets = venue.discover_markets(cfg.markets.slug_prefixes)
+        markets = venue.discover_markets(
+            cfg.markets.slug_prefixes, strike_bounds=cfg.markets.strike_bounds
+        )
     except Exception as exc:  # noqa: BLE001
         print(f"\nFAIL: market discovery failed: {exc}", file=sys.stderr)
         venue.close()

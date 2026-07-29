@@ -15,8 +15,16 @@ from ..models import Book, Market, Order
 class Venue(Protocol):
     name: str
 
-    def discover_markets(self, prefixes: list[str]) -> list[Market]:
-        """Open windows whose identifier starts with any given prefix."""
+    def discover_markets(
+        self,
+        prefixes: list[str],
+        strike_bounds: dict[str, tuple[float, float]] | None = None,
+    ) -> list[Market]:
+        """Open windows whose identifier starts with any given prefix.
+
+        `strike_bounds` maps prefix -> (min, max) plausible strike so each asset
+        is parsed against its own range rather than BTC's.
+        """
         ...
 
     def get_books(self, market: Market) -> Optional[tuple[Book, Book]]:

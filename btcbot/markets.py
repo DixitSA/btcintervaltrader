@@ -14,6 +14,7 @@ from typing import Any, Optional
 
 import httpx
 
+from .config import strike_bounds_for_prefix
 from .models import Market
 
 log = logging.getLogger(__name__)
@@ -38,11 +39,19 @@ class GammaClient:
         self.close()
 
     def fetch_open_markets(
-        self, slug_prefixes: str | list[str], limit: int = 250
+        self,
+        slug_prefixes: str | list[str],
+        limit: int = 250,
+        strike_bounds: dict[str, tuple[float, float]] | None = None,
     ) -> list[Market]:
-        """All open windows whose slug starts with any of `slug_prefixes`."""
+        """All open windows whose slug starts with any of `slug_prefixes`.
+
+        `strike_bounds` maps prefix -> (min, max) plausible strike, normally from
+        family config; missing entries fall back to the asset's default range.
+        """
         if isinstance(slug_prefixes, str):
             slug_prefixes = [slug_prefixes]
+        bounds = strike_bounds or {}
 
         resp = self._http.get(
             f"{self.base_url}/markets",
@@ -58,9 +67,11 @@ class GammaClient:
         markets = []
         for raw in resp.json():
             slug = str(raw.get("slug", ""))
-            if not any(slug.startswith(p) for p in slug_prefixes):
+            match = next((p for p in slug_prefixes if slug.startswith(p)), None)
+            if match is None:
                 continue
-            parsed = parse_market(raw)
+            lo, hi = bounds.get(match) or strike_bounds_for_prefix(match)
+            parsed = parse_market(raw, strike_min=lo, strike_max=hi)
             if parsed is not None:
                 markets.append(parsed)
         return markets
@@ -76,12 +87,8 @@ def _parse_ts(value: Any) -> Optional[float]:
         return None
 
 
-def _strike_bounds_for_prefix(prefix: str) -> tuple[float, float]:
-    upper = prefix.upper()
-    for sym, lo, hi in (("BTC", 1_000, 10_000_000), ("ETH", 100, 100_000), ("SOL", 1, 10_000)):
-        if sym in upper:
-            return (lo, hi)
-    return (1_000, 10_000_000)
+#: Re-exported so callers can resolve bounds without importing config.
+_strike_bounds_for_prefix = strike_bounds_for_prefix
 
 
 def parse_strike(*texts: Any, strike_min: float | None = None, strike_max: float | None = None) -> Optional[float]:

@@ -114,7 +114,10 @@ class Runner:
         if now - cached_at < 20.0 and cached:
             return cached
         try:
-            markets = self.venue.discover_markets(self.cfg.markets.slug_prefixes)
+            markets = self.venue.discover_markets(
+                self.cfg.markets.slug_prefixes,
+                strike_bounds=self.cfg.markets.strike_bounds,
+            )
         except Exception as exc:  # noqa: BLE001 - a discovery blip must not kill the loop
             log.warning("market discovery failed: %s", exc)
             return cached

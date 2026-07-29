@@ -36,6 +36,7 @@ from typing import Any, Optional
 
 import httpx
 
+from ..config import strike_bounds_for_prefix
 from ..models import DOWN, UP, Book, Level, Market, Order
 
 log = logging.getLogger(__name__)
@@ -190,13 +191,8 @@ def parse_open_ts(raw: dict[str, Any]) -> Optional[float]:
     return None
 
 
-def _strike_bounds_for_prefix(prefix: str) -> tuple[float, float]:
-    """Reasonable fallback strike bounds when family config is unavailable."""
-    upper = prefix.upper()
-    for sym, lo, hi in (("BTC", 1_000, 10_000_000), ("ETH", 100, 100_000), ("SOL", 1, 10_000)):
-        if sym in upper:
-            return (lo, hi)
-    return (1_000, 10_000_000)
+#: Re-exported so callers can resolve bounds without importing config.
+_strike_bounds_for_prefix = strike_bounds_for_prefix
 
 
 def parse_strike(raw: dict[str, Any], strike_min: float | None = None, strike_max: float | None = None) -> Optional[float]:
@@ -327,15 +323,24 @@ class KalshiVenue:
 
     # -- market data ---------------------------------------------------
 
-    def discover_markets(self, prefixes: list[str]) -> list[Market]:
+    def discover_markets(
+        self,
+        prefixes: list[str],
+        strike_bounds: dict[str, tuple[float, float]] | None = None,
+    ) -> list[Market]:
         """Open markets in any of the given series.
 
         `prefixes` are series tickers (e.g. KXBTC15M), matched case-insensitively
         against the market ticker prefix.
+
+        `strike_bounds` maps prefix -> (min, max) plausible strike, normally from
+        family config. Anything missing falls back to the asset's default range,
+        which matters because BTC's range rejects every SOL strike.
         """
         if isinstance(prefixes, str):
             prefixes = [prefixes]
         wanted = [p.upper() for p in prefixes]
+        bounds = {k.upper(): v for k, v in (strike_bounds or {}).items()}
 
         found: list[Market] = []
         seen: set[str] = set()
@@ -354,9 +359,16 @@ class KalshiVenue:
                 ticker = str(raw.get("ticker") or "")
                 if ticker in seen:
                     continue
-                if not any(ticker.upper().startswith(p) for p in wanted):
+                # Resolve bounds from the prefix this ticker actually matches --
+                # the /markets query is per-series but the filter accepts any
+                # wanted prefix, so `series` is not necessarily the right asset.
+                match = next(
+                    (p for p in wanted if ticker.upper().startswith(p)), None
+                )
+                if match is None:
                     continue
-                market = parse_market(raw)
+                lo, hi = bounds.get(match) or strike_bounds_for_prefix(match)
+                market = parse_market(raw, strike_min=lo, strike_max=hi)
                 if market is not None:
                     seen.add(ticker)
                     found.append(market)

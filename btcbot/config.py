@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import yaml
 
@@ -54,6 +54,28 @@ class FeeConfig:
     slippage: float = 0.005
 
 
+#: Plausible strike range per asset, used to reject garbage pulled out of
+#: market text. Ranges are deliberately wide -- they are a sanity filter, not
+#: a price forecast -- but they must not overlap zero or each other's decades.
+_STRIKE_BOUNDS = (
+    ("BTC", 1_000.0, 10_000_000.0),
+    ("ETH", 100.0, 100_000.0),
+    ("SOL", 1.0, 10_000.0),
+)
+
+
+def strike_bounds_for_prefix(prefix: str) -> tuple[float, float]:
+    """(min, max) plausible strike for the asset named in *prefix*.
+
+    Falls back to BTC's range for unrecognised prefixes.
+    """
+    upper = prefix.upper()
+    for sym, lo, hi in _STRIKE_BOUNDS:
+        if sym in upper:
+            return (lo, hi)
+    return (1_000.0, 10_000_000.0)
+
+
 @dataclass
 class FamilyConfig:
     """One asset family: market prefix + spot config + strike bounds.
@@ -65,8 +87,11 @@ class FamilyConfig:
     prefix: str
     spot_symbol: str = ""
     display_name: str = ""
-    strike_min: float = 1_000
-    strike_max: float = 10_000_000
+    # Left as None, these are derived per-asset from the prefix. Hardcoding
+    # BTC's bounds as the default would put every SOL strike (~$150) under the
+    # floor, where it parses as None and the window can never be settled.
+    strike_min: Optional[float] = None
+    strike_max: Optional[float] = None
     window_seconds: int = 900
 
     def __post_init__(self) -> None:
@@ -74,6 +99,11 @@ class FamilyConfig:
             self.spot_symbol = _default_spot(self.prefix)
         if not self.display_name:
             self.display_name = _default_display(self.prefix)
+        lo, hi = strike_bounds_for_prefix(self.prefix)
+        if self.strike_min is None:
+            self.strike_min = lo
+        if self.strike_max is None:
+            self.strike_max = hi
 
 
 def _default_spot(prefix: str) -> str:
@@ -92,6 +122,59 @@ def _default_display(prefix: str) -> str:
     return prefix
 
 
+def coerce_families(raw: Any) -> dict[str, FamilyConfig]:
+    """Normalise whatever `markets.families` came in as into FamilyConfigs.
+
+    YAML hands us {"btc": {"prefix": ..., ...}} -- plain nested dicts. Without
+    this, those inner dicts get installed verbatim and every `fam.prefix` or
+    `fam.spot_symbol` downstream raises AttributeError, which takes out market
+    discovery and the spot feeds for *every* family, not just new ones.
+
+    Also accepts a bare list of prefixes (["KXBTC15M"]) and already-built
+    FamilyConfig values, so programmatic construction keeps working.
+    """
+    if not raw:
+        # An empty families block means no markets to trade. Failing loudly
+        # here beats silently defaulting to BTC and trading something the
+        # config never asked for.
+        raise ValueError(
+            "markets.families is empty -- define at least one family "
+            "(e.g. btc: {prefix: KXBTC15M})"
+        )
+
+    if isinstance(raw, str):
+        raw = [raw]
+    if isinstance(raw, list):
+        return {_family_key(p): FamilyConfig(prefix=p) for p in raw}
+
+    if not isinstance(raw, dict):
+        raise ValueError(f"markets.families must be a mapping or list, got {type(raw).__name__}")
+
+    out: dict[str, FamilyConfig] = {}
+    for key, value in raw.items():
+        if isinstance(value, FamilyConfig):
+            out[key] = value
+        elif isinstance(value, str):
+            out[key] = FamilyConfig(prefix=value)
+        elif isinstance(value, dict):
+            known = set(FamilyConfig.__dataclass_fields__)
+            unknown = set(value) - known
+            if unknown:
+                raise ValueError(
+                    f"unknown key(s) in markets.families.{key}: "
+                    f"{', '.join(sorted(unknown))} (known: {', '.join(sorted(known))})"
+                )
+            if "prefix" not in value:
+                raise ValueError(f"markets.families.{key} is missing required key 'prefix'")
+            out[key] = FamilyConfig(**value)
+        else:
+            raise ValueError(
+                f"markets.families.{key} must be a mapping or prefix string, "
+                f"got {type(value).__name__}"
+            )
+    return out
+
+
 @dataclass
 class MarketsConfig:
     # Every family of windows to trade. Key is a short slug like "btc".
@@ -107,6 +190,11 @@ class MarketsConfig:
     min_book_depth_usd: float = 50.0
     max_spread: float = 0.05
 
+    def __post_init__(self) -> None:
+        # Covers direct construction, e.g. MarketsConfig(families={"btc": {...}}).
+        # load_config coerces separately because _merge() setattrs past this.
+        self.families = coerce_families(self.families)
+
     @property
     def slug_prefixes(self) -> list[str]:
         return [f.prefix for f in self.families.values()]
@@ -117,6 +205,15 @@ class MarketsConfig:
         for f in self.families.values():
             return f.window_seconds
         return 900
+
+    @property
+    def strike_bounds(self) -> dict[str, tuple[float, float]]:
+        """{prefix: (strike_min, strike_max)} for the market parsers.
+
+        Without these, strike parsing falls back to BTC's $1k-$10M window and
+        every SOL strike (~$150) lands under the floor and parses as None.
+        """
+        return {f.prefix: (f.strike_min, f.strike_max) for f in self.families.values()}
 
     def family_for(self, slug: str) -> str | None:
         """Return the family key whose prefix matches *slug*, or None."""
@@ -308,6 +405,10 @@ def load_config(path: str | Path | None = None) -> Config:
     ):
         if section in raw:
             _merge(target, raw.pop(section))
+
+    # _merge() setattrs straight onto the dataclass, so the nested families
+    # mapping arrives as raw YAML dicts and __post_init__ never sees it.
+    cfg.markets.families = coerce_families(cfg.markets.families)
 
     if "execution" in raw:
         ex = raw.pop("execution") or {}

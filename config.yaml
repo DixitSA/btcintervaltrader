@@ -34,18 +34,21 @@ markets:
       display_name: BTC
       strike_min: 1_000
       strike_max: 10_000_000
-    # eth:
-    #   prefix: KXETH15M
-    #   spot_symbol: ETHUSDT
-    #   display_name: ETH
-    #   strike_min: 100
-    #   strike_max: 100_000
-    # sol:
-    #   prefix: KXSOL15M
-    #   spot_symbol: SOLUSDT
-    #   display_name: SOL
-    #   strike_min: 1
-    #   strike_max: 10_000
+    # Strike bounds are a sanity filter on parsed strikes, not a forecast.
+    # They must match the asset's decade: SOL trades near $70, so BTC's
+    # $1k floor would reject every SOL strike and leave it unsettleable.
+    eth:
+      prefix: KXETH15M
+      spot_symbol: ETHUSDT
+      display_name: ETH
+      strike_min: 100
+      strike_max: 100_000
+    sol:
+      prefix: KXSOL15M
+      spot_symbol: SOLUSDT
+      display_name: SOL
+      strike_min: 1
+      strike_max: 10_000
   # Do not enter in the last 30s: the book thins and you are racing bots with
   # colocated infrastructure you do not have.
   min_seconds_remaining: 30

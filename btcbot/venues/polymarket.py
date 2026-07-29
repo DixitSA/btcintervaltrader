@@ -30,8 +30,12 @@ class PolymarketVenue:
         self.gamma.close()
         self.clob.close()
 
-    def discover_markets(self, prefixes: list[str]) -> list[Market]:
-        return self.gamma.fetch_open_markets(prefixes)
+    def discover_markets(
+        self,
+        prefixes: list[str],
+        strike_bounds: dict[str, tuple[float, float]] | None = None,
+    ) -> list[Market]:
+        return self.gamma.fetch_open_markets(prefixes, strike_bounds=strike_bounds)
 
     def get_books(self, market: Market) -> Optional[tuple[Book, Book]]:
         books = self.clob.get_books([market.up_token_id, market.down_token_id])

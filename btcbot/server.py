@@ -43,34 +43,71 @@ def seed_spot_history(spot_feed, data_dir: str, tail_bytes: int = 2_000_000) -> 
 
 
 def seed_spot_manager(manager, data_dir: str, tail_bytes: int = 2_000_000) -> int:
-    """Preload all spot feeds from snapshot data on disk.
+    """Preload every family's spot feed from ITS OWN recorded rows.
 
-    Recorded snapshots carry a single `spot` field (BTC).  Newer data may
-    carry per-family spots once the recorder is updated; for now only BTC
-    is seeded from history, and other feeds start cold.
+    Each snapshot row carries one `spot` for one market, and multi-family
+    recordings interleave assets in the same file at the SAME timestamp. Seeding
+    every feed from every row therefore fed BTC's prices into the ETH and SOL
+    feeds, so their realized_vol was BTC's volatility. Rows are bucketed by the
+    market slug's family so each feed only ever sees its own asset.
     """
+    buckets = _read_spot_points(data_dir, manager._families, tail_bytes)
     total = 0
-    for sym in list(manager._feeds.keys()):
-        total += _seed_one(manager._feed(sym), data_dir, tail_bytes)
-    # Seed the first (BTC) feed even if not yet created.
-    if total == 0:
-        from .config import FamilyConfig
-
-        for fam in manager._families.values():
-            total += _seed_one(manager._feed(fam.spot_symbol), data_dir, tail_bytes)
-            break
+    for symbol, points in buckets.items():
+        feed = manager._feed(symbol)
+        for point in points:
+            feed._history.append(point)
+        total += len(points)
     return total
 
 
-def _seed_one(feed, data_dir: str, tail_bytes: int) -> int:
-    """Preload *feed* from the `spot` field in recorded snapshots."""
+def _read_spot_points(
+    data_dir: str, families, tail_bytes: int
+) -> dict[str, list[tuple[float, float]]]:
+    """{spot_symbol: [(ts, spot), ...]} from the newest snapshot file.
+
+    A row whose slug matches no configured family is skipped rather than
+    guessed at -- attributing it to the wrong asset is worse than dropping it.
+    """
+    # Longest prefix first so KXBTC15M wins over a hypothetical KXBTC.
+    prefixes = sorted(
+        ((fam.prefix.upper(), fam.spot_symbol) for fam in families.values()),
+        key=lambda pair: len(pair[0]),
+        reverse=True,
+    )
+    raw = _tail_snapshot_lines(data_dir, tail_bytes)
+    buckets: dict[str, list[tuple[float, float]]] = {}
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        ts, spot = row.get("ts"), row.get("spot")
+        if ts is None or spot is None:
+            continue
+        slug = str((row.get("market") or {}).get("slug") or "").upper()
+        symbol = next((sym for pfx, sym in prefixes if slug.startswith(pfx)), None)
+        if symbol is None:
+            continue
+        points = buckets.setdefault(symbol, [])
+        # Monotonic per symbol: repeated ts within one asset carry no new info.
+        if points and points[-1][0] >= float(ts):
+            continue
+        points.append((float(ts), float(spot)))
+    return buckets
+
+
+def _tail_snapshot_lines(data_dir: str, tail_bytes: int) -> str:
+    """Text of the tail of the newest snapshots file, or "" if unavailable."""
     directory = Path(data_dir)
     if not directory.exists():
-        return 0
+        return ""
     files = sorted(directory.glob("snapshots-*.jsonl"))
     if not files:
-        return 0
-
+        return ""
     newest = files[-1]
     try:
         size = newest.stat().st_size
@@ -78,13 +115,21 @@ def _seed_one(feed, data_dir: str, tail_bytes: int) -> int:
             if size > tail_bytes:
                 fh.seek(size - tail_bytes)
                 fh.readline()
-            raw = fh.read().decode("utf-8", errors="replace")
+            return fh.read().decode("utf-8", errors="replace")
     except OSError as exc:
         log.warning("could not seed spot history: %s", exc)
-        return 0
+        return ""
 
+
+def _seed_one(feed, data_dir: str, tail_bytes: int) -> int:
+    """Preload a single *feed* from the `spot` field in recorded snapshots.
+
+    Unfiltered: every row's spot goes into this one feed. Only correct when the
+    data is single-asset. Multi-family callers must use seed_spot_manager, which
+    buckets rows per asset.
+    """
     points: list[tuple[float, float]] = []
-    for line in raw.splitlines():
+    for line in _tail_snapshot_lines(data_dir, tail_bytes).splitlines():
         line = line.strip()
         if not line:
             continue
@@ -173,7 +218,9 @@ class PaperSession:
             build_strategy(cfg.strategy.name, cfg.strategy.params) if trade else None
         )
         runner = Runner(cfg, strategy=strategy, record=trade, trade=trade)
-        seeded = seed_spot_history(runner.spot, cfg.data_dir)
+        # Seed via the manager, not runner.spot: the single-feed helper would
+        # load only the first family and pour other assets' prices into it.
+        seeded = seed_spot_manager(runner.spot_manager, cfg.data_dir)
         if seeded:
             log.info("seeded %d spot points from %s", seeded, cfg.data_dir)
         return runner
@@ -365,7 +412,24 @@ class PaperSession:
                     "return_pct": (t.pnl / cost) if cost else None,
                 }
             )
-        return {
+        # Build equity curve from all closed trades. Start at starting_cash,
+        # accumulate PnL chronologically at each settlement. Always include the
+        # starting point and the current equity so the chart has known bounds.
+        import sys; sys.stderr.write("DEBUG portfolio_dict CALLED\n"); sys.stderr.flush()
+        now = time.time()
+        curve: list[list[float]] = []
+        sorted_trades = sorted(p.closed, key=lambda t: t.exit_ts)
+        running = p.starting_cash
+        if sorted_trades:
+            for t in sorted_trades:
+                running += t.pnl
+                curve.append([t.exit_ts, running])
+        curve.append([now, p.equity])
+        if len(curve) > 500:
+            step = len(curve) / 500
+            curve = [curve[int(i * step)] for i in range(500)]
+        sys.stderr.write(f"DEBUG curve len={len(curve)}\n"); sys.stderr.flush()
+        result = {
             "trades": trades,
             "trades_truncated": max(0, len(p.closed) - MAX_TRADES_IN_STATE),
             "active": True,
@@ -379,7 +443,10 @@ class PaperSession:
             "closed_trades": len(p.closed),
             "wins": wins,
             "losses": len(p.closed) - wins,
+            "equity_curve": curve,
+            "_debug_curve_len": len(curve),
         }
+        return result
 
     def recorder_dict(self) -> dict[str, Any]:
         data_dir = Path(self.cfg.data_dir)
