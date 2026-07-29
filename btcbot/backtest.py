@@ -12,7 +12,7 @@ rate and a standard error so you can see whether your sample says anything.
 from __future__ import annotations
 
 import math
-from collections import defaultdict
+from collections import defaultdict, deque
 from dataclasses import dataclass, field, replace
 from typing import Iterable, Optional
 
@@ -23,7 +23,7 @@ from .exits import DrawdownGuard, ExitPolicy
 from .models import DOWN, UP, Fill, Order, Snapshot
 from .portfolio import EXIT_EXPIRY, Portfolio, mark_for
 from .risk import RiskManager
-from .signals import market_implied_up
+from .signals import market_implied_up, realized_vol_from_series
 from .strategies.base import Strategy
 
 
@@ -336,6 +336,15 @@ def run_backtest(
     signalled: set[str] = set()
     entry_reason: dict[str, str] = {}
 
+    # Feed realized volatility to strategies that want it, from the recorded
+    # spot series. The SAME window drives both the measurement and the
+    # annualisation, so the two cannot drift apart. Without this the model
+    # strategies silently run on their hardcoded default vol in backtest while
+    # the live runner uses a measured one -- two different strategies wearing
+    # one name.
+    vol_window = getattr(strategy, "realized_vol_window", None)
+    spot_history: deque[tuple[float, float]] = deque(maxlen=10_000)
+
     def record(slug: str) -> None:
         last = portfolio.closed[-1]
         report.exits[last.exit_reason] += 1
@@ -355,6 +364,26 @@ def run_backtest(
 
     for snap in ordered:
         slug = snap.market.slug
+
+        # Spot is global, so record it once per timestamp rather than once per
+        # concurrent market. This does NOT change the estimate -- duplicating
+        # points halves the variance and doubles the count, which the sqrt(n)
+        # scaling cancels exactly. It matters because the buffer is bounded:
+        # with several families running, duplicates would fill it that many
+        # times faster and the lookback would silently cover proportionally
+        # less real time than asked for.
+        if vol_window and snap.spot is not None:
+            if not spot_history or snap.ts > spot_history[-1][0]:
+                spot_history.append((snap.ts, snap.spot))
+                # Drop points that have fallen out of the lookback, so each
+                # estimate scans the window rather than the whole history and
+                # memory stays bounded by the window rather than the dataset.
+                cutoff = snap.ts - float(vol_window)
+                while len(spot_history) > 2 and spot_history[0][0] < cutoff:
+                    spot_history.popleft()
+            strategy.current_realized_vol = realized_vol_from_series(
+                spot_history, float(vol_window)
+            )
 
         # -- manage an open position -----------------------------------
         if portfolio.has_position(slug):

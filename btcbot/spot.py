@@ -16,6 +16,8 @@ from typing import Any, Optional
 
 import httpx
 
+from .signals import realized_vol_from_series
+
 log = logging.getLogger(__name__)
 
 
@@ -77,19 +79,9 @@ class SpotFeed:
         ]
 
     def realized_vol(self, lookback_seconds: float = 300.0) -> Optional[float]:
-        """Stdev of log returns over the lookback, scaled to that window."""
-        if len(self._history) < 3:
-            return None
-        cutoff = time.time() - lookback_seconds
-        pts = [px for ts, px in self._history if ts >= cutoff]
-        if len(pts) < 3:
-            return None
-        rets = []
-        for prev, cur in zip(pts, pts[1:]):
-            if prev > 0 and cur > 0:
-                rets.append((cur - prev) / prev)
-        if len(rets) < 2:
-            return None
-        mean = sum(rets) / len(rets)
-        var = sum((r - mean) ** 2 for r in rets) / (len(rets) - 1)
-        return var**0.5 * (len(rets) ** 0.5)
+        """Stdev of log returns over the lookback, scaled to that window.
+
+        Delegates to the shared implementation so the live path and the
+        backtester cannot drift apart.
+        """
+        return realized_vol_from_series(self._history, lookback_seconds)

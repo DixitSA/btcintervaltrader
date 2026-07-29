@@ -27,7 +27,10 @@ class EdgeThresholdStrategy(Strategy):
         self,
         min_edge: float = 0.05,
         vol_per_year: float = 0.60,
-        realized_vol_window: Optional[float] = None,
+        # Measure vol over the last window by default rather than assume it.
+        # Set to None to fall back to the fixed `vol_per_year`, but read the
+        # warning on _vol() before you do.
+        realized_vol_window: Optional[float] = 900.0,
         max_prob: float = 0.95,
         **params,
     ):
@@ -45,11 +48,30 @@ class EdgeThresholdStrategy(Strategy):
         # Optionally injected by the runner/backtester each tick.
         self.current_realized_vol: Optional[float] = None
 
-    def _vol(self) -> float:
-        if self.current_realized_vol and self.realized_vol_window:
+    def _vol(self) -> Optional[float]:
+        """Annualized vol to price with, or None if it cannot be measured.
+
+        WHY THIS REFUSES TO GUESS. The whole signal here is model-vs-market, so
+        the volatility is not a tuning knob -- it IS the edge. Getting it wrong
+        does not weaken the signal, it fabricates one.
+
+        Measured against live KXBTC15M spot, BTC realized vol ran ~24% while
+        the old hardcoded default assumed 60%. With spot $50 above the strike
+        and 450s left, that gap alone puts the model 17 POINTS below the fair
+        price -- more than three times the 5-point trigger. The sign is
+        negative on every upward move, so the strategy would have faded every
+        rally into a correctly priced book, systematically, and paid ~7%
+        round-trip fees for the privilege.
+
+        So when a measurement window is configured but no measurement has
+        arrived yet, this returns None and the strategy declines to trade,
+        rather than falling back to a constant that has no claim to being right.
+        """
+        if self.realized_vol_window:
+            if not self.current_realized_vol:
+                return None
             ann = annualize(self.current_realized_vol, float(self.realized_vol_window))
-            if ann and ann > 0:
-                return ann
+            return ann if ann and ann > 0 else None
         return self.vol_per_year
 
     def decide(self, snap: Snapshot) -> Optional[Signal]:
@@ -61,11 +83,17 @@ class EdgeThresholdStrategy(Strategy):
         if remaining <= 0:
             return None
 
+        vol = self._vol()
+        if vol is None:
+            # No calibrated volatility yet -- an uncalibrated model would
+            # invent edge rather than find it. See _vol().
+            return None
+
         model_up = fair_probability_up(
             spot=snap.spot,
             strike=snap.market.strike,
             seconds_remaining=remaining,
-            vol_per_year=self._vol(),
+            vol_per_year=vol,
         )
         if model_up is None:
             return None

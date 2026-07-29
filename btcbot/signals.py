@@ -38,6 +38,43 @@ def fair_probability_up(
     return normal_cdf(d2)
 
 
+def realized_vol_from_series(
+    points, lookback_seconds: float
+) -> Optional[float]:
+    """Stdev of log returns over the lookback, scaled to that whole window.
+
+    `points` is (timestamp, price), oldest first. "Now" is the last point's
+    timestamp rather than the wall clock, so this works unchanged when
+    replaying recorded history.
+
+    The result is the volatility OVER `lookback_seconds`; pass it and the SAME
+    lookback to `annualize`. One implementation shared by the live runner and
+    the backtester is deliberate -- if those two measured vol differently the
+    backtest would silently be describing a strategy that never runs.
+
+    Log returns, not simple returns, because fair_probability_up prices a
+    geometric walk in log space.
+    """
+    pts_all = list(points)
+    if not pts_all or lookback_seconds <= 0:
+        return None
+
+    cutoff = pts_all[-1][0] - lookback_seconds
+    prices = [px for ts, px in pts_all if ts >= cutoff and px > 0]
+    if len(prices) < 3:
+        return None
+
+    rets = [math.log(cur / prev) for prev, cur in zip(prices, prices[1:])]
+    if len(rets) < 2:
+        return None
+
+    mean = sum(rets) / len(rets)
+    var = sum((r - mean) ** 2 for r in rets) / (len(rets) - 1)
+    if var <= 0:
+        return None
+    return var**0.5 * (len(rets) ** 0.5)
+
+
 def annualize(window_vol: float, window_seconds: float) -> Optional[float]:
     """Scale a realized vol measured over `window_seconds` to annual terms."""
     if window_vol <= 0 or window_seconds <= 0:

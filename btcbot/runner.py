@@ -170,6 +170,16 @@ class Runner:
         spot_px = self.spot.price()
         self._settle_expired(now)
 
+        # Hand the strategy a measured volatility if it wants one. The window
+        # configured on the strategy drives both the measurement here and the
+        # annualisation inside it, so there is a single source of truth. The
+        # backtester does exactly the same thing from the recorded spot series.
+        vol_window = getattr(self.strategy, "realized_vol_window", None)
+        if vol_window:
+            self.strategy.current_realized_vol = self.spot.realized_vol(
+                float(vol_window)
+            )
+
         for market in self._markets(now):
             remaining = market.seconds_remaining(now)
             if remaining <= 0 or remaining > self.cfg.markets.max_seconds_remaining:
