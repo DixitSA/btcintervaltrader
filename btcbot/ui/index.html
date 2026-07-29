@@ -124,6 +124,17 @@
     background: color-mix(in srgb, var(--down) 14%, transparent);
     color: var(--down); border: 1px solid var(--down); margin-bottom: 12px;
   }
+  .chart-wrap {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 10px; padding: 12px 14px;
+  }
+  .chart-wrap h2 {
+    font-size: 11px; text-transform: uppercase; letter-spacing: .08em;
+    color: var(--dim); margin: 0 0 10px; font-weight: 600;
+  }
+  .chart-wrap canvas {
+    display: block; width: 100%; height: 180px;
+  }
 </style>
 </head>
 <body>
@@ -177,13 +188,18 @@
     </div>
   </div>
 
+  <div class="chart-wrap">
+    <h2>Equity over time</h2>
+    <canvas id="equity-chart" height="180"></canvas>
+  </div>
+
   <div class="card">
     <h2>Trade history <span class="dim" id="trade-summary" style="text-transform:none;letter-spacing:0"></span></h2>
     <div class="scroll">
       <table>
         <thead><tr>
           <th>result</th><th>closed</th><th>market</th><th>side</th><th>shares</th>
-          <th>entry</th><th>exit</th><th>stake</th><th>P&amp;L</th><th>return</th>
+          <th title="price paid per contract at open">buy @</th><th title="price received per contract at close">sell @</th><th>stake</th><th>P&amp;L</th><th>return</th>
           <th>fees</th><th>held</th><th>exit reason</th>
         </tr></thead>
         <tbody id="trades"><tr><td colspan="13" class="dim">no closed trades yet</td></tr></tbody>
@@ -305,6 +321,7 @@ document.querySelector(".tabs").addEventListener("click", (e) => {
   const want = tab.dataset.screen;
   $("paper-screen").style.display = want === "paper" ? "" : "none";
   $("live-screen").style.display  = want === "live" ? "" : "none";
+
 });
 
 function renderLive(s) {
@@ -559,6 +576,107 @@ function renderMarkets(rows) {
   }).join(""));
 }
 
+function drawEquityCurve(curve, startingCash) {
+  const canvas = $("equity-chart");
+  if (!canvas) return;
+  const parent = canvas.parentElement;
+  const pw = parent ? parent.clientWidth - 0 : 800;
+  const w = Math.max(pw - 28, 200);
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = w * dpr;
+  canvas.height = 180 * dpr;
+  canvas.style.width = w + "px";
+  canvas.style.height = "180px";
+  const ctx = canvas.getContext("2d");
+  ctx.scale(dpr, dpr);
+
+  // Resolve CSS variable colors once (canvas can't use var() directly)
+  const cs = getComputedStyle(document.documentElement);
+  const c = (v) => cs.getPropertyValue(v).trim() || (v === "--line" ? "#262b36" : v === "--dim" ? "#939bab" : v === "--up" ? "#3fb950" : v === "--down" ? "#f85149" : "#e6e9ef");
+
+  const pad = { top: 12, bottom: 22, left: 50, right: 12 };
+  const cw = w - pad.left - pad.right;
+  const ch = 180 - pad.top - pad.bottom;
+
+  const prices = curve.map((pt) => pt[1]);
+  const times = curve.map((pt) => pt[0]);
+  const minP = Math.min(...prices, startingCash);
+  const maxP = Math.max(...prices, startingCash);
+  const range = maxP - minP || 1;
+  const t0 = times[0];
+  const t1 = times[times.length - 1];
+  const tRange = t1 - t0 || 1;
+
+  const x = (t) => pad.left + ((t - t0) / tRange) * cw;
+  const y = (v) => pad.top + ch - ((v - minP) / range) * ch;
+
+  ctx.clearRect(0, 0, w, 180);
+
+  // grid lines (horizontal, 4 ticks)
+  ctx.strokeStyle = c("--line");
+  ctx.lineWidth = 0.5;
+  for (let i = 0; i <= 4; i++) {
+    const gy = pad.top + (ch / 4) * i;
+    ctx.beginPath();
+    ctx.moveTo(pad.left, gy);
+    ctx.lineTo(pad.left + cw, gy);
+    ctx.stroke();
+    const val = maxP - (range / 4) * i;
+    ctx.fillStyle = c("--dim");
+    ctx.font = "10px ui-sans-serif, system-ui, sans-serif";
+    ctx.textAlign = "right";
+    ctx.fillText("$" + val.toFixed(2), pad.left - 6, gy + 3);
+  }
+
+  // baseline at starting cash
+  if (startingCash > minP && startingCash < maxP) {
+    ctx.strokeStyle = c("--dim");
+    ctx.lineWidth = 0.5;
+    ctx.setLineDash([3, 3]);
+    ctx.beginPath();
+    ctx.moveTo(pad.left, y(startingCash));
+    ctx.lineTo(pad.left + cw, y(startingCash));
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  // shade area under curve
+  ctx.beginPath();
+  ctx.moveTo(x(times[0]), pad.top + ch);
+  for (let i = 0; i < times.length; i++) {
+    ctx.lineTo(x(times[i]), y(prices[i]));
+  }
+  ctx.lineTo(x(times[times.length - 1]), pad.top + ch);
+  ctx.closePath();
+  const above = prices[prices.length - 1] >= startingCash;
+  const fillC = above ? c("--up") : c("--down");
+  ctx.fillStyle = fillC + "18";
+  ctx.fill();
+
+  // line
+  ctx.beginPath();
+  ctx.moveTo(x(times[0]), y(prices[0]));
+  for (let i = 1; i < times.length; i++) {
+    ctx.lineTo(x(times[i]), y(prices[i]));
+  }
+  ctx.strokeStyle = above ? c("--up") : c("--down");
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+
+  // start / end markers
+  ctx.fillStyle = c("--dim");
+  ctx.font = "10px ui-sans-serif, system-ui, sans-serif";
+  ctx.textAlign = "center";
+  const fmtTime = (ts) => {
+    const d = new Date(ts * 1000);
+    const h = String(d.getHours()).padStart(2, "0");
+    const m = String(d.getMinutes()).padStart(2, "0");
+    return h + ":" + m;
+  };
+  ctx.fillText(fmtTime(t0), pad.left, 180 - 4);
+  ctx.fillText(fmtTime(t1), pad.left + cw, 180 - 4);
+}
+
 async function refresh() {
   let s;
   try {
@@ -612,6 +730,10 @@ async function refresh() {
   setText($("vol"), vol == null ? "-" : pct(vol));
 
   renderLive(s);
+
+  if (p.active && Array.isArray(p.equity_curve) && p.equity_curve.length >= 1) {
+    drawEquityCurve(p.equity_curve, p.starting_cash);
+  }
 
   const r = s.recorder || {};
   setText($("snaps"), num(r.snapshots));
