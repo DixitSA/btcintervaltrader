@@ -308,14 +308,19 @@ class PaperSession:
                     "entry_price": pos.entry_price,
                 }
             )
+        wins = sum(1 for t in p.closed if t.won)
         return {
             "active": True,
             "equity": p.equity,
             "cash": getattr(p, "cash", None),
             "starting_cash": p.starting_cash,
             "pnl": p.equity - p.starting_cash,
+            "realized_pnl": p.realized_pnl,
             "positions": positions,
             "n_positions": len(positions),
+            "closed_trades": len(p.closed),
+            "wins": wins,
+            "losses": len(p.closed) - wins,
         }
 
     def recorder_dict(self) -> dict[str, Any]:

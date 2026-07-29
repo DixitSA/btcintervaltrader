@@ -14,8 +14,12 @@
     </div>
     <div class="bb-body" id="bb-body">
       <div class="bb-msg" id="bb-msg">connecting…</div>
-      <div id="bb-portfolio" style="display:none"></div>
-      <div id="bb-controls" style="display:none"></div>
+      <div id="bb-tabs" style="display:none">
+        <button class="bb-tab bb-tab-active" data-tab="paper">Paper</button>
+        <button class="bb-tab" data-tab="live">Live</button>
+      </div>
+      <div id="bb-paper-panel"></div>
+      <div id="bb-live-panel" style="display:none"></div>
       <div id="bb-markets"></div>
       <div class="bb-foot">read-only · places no orders</div>
     </div>`;
@@ -27,6 +31,16 @@
   });
   head.addEventListener("dblclick", () => {
     panel.classList.toggle("bb-collapsed");
+  });
+
+  // Tab switching
+  document.getElementById("bb-tabs").addEventListener("click", (e) => {
+    const tab = e.target.closest(".bb-tab");
+    if (!tab) return;
+    document.querySelectorAll(".bb-tab").forEach((t) => t.classList.remove("bb-tab-active"));
+    tab.classList.add("bb-tab-active");
+    document.getElementById("bb-paper-panel").style.display = tab.dataset.tab === "paper" ? "" : "none";
+    document.getElementById("bb-live-panel").style.display = tab.dataset.tab === "live" ? "" : "none";
   });
 
   const pct = (v) => (v == null ? "—" : (v * 100).toFixed(1) + "%");
@@ -60,39 +74,59 @@
     });
   }
 
-  function renderPortfolio(p) {
-    const el = document.getElementById("bb-portfolio");
+  function renderPortfolio(p, mode) {
+    const paperPanel = document.getElementById("bb-paper-panel");
+    const livePanel = document.getElementById("bb-live-panel");
+
     if (!p || !p.active) {
-      el.style.display = "none";
+      paperPanel.innerHTML = `<div class="bb-section-label">Paper Trading</div><div class="bb-dim" style="padding:6px 0">not started</div>`;
+      livePanel.innerHTML = `<div class="bb-section-label">Live Trading</div><div class="bb-dim" style="padding:6px 0">disabled (mode: ${mode})</div>`;
+      document.getElementById("bb-tabs").style.display = "none";
       return;
     }
-    el.style.display = "block";
+    document.getElementById("bb-tabs").style.display = "flex";
+
     const pnlCls = p.pnl > 0 ? "bb-up" : p.pnl < 0 ? "bb-down" : "";
     const posDetail = (p.positions || []).length
       ? p.positions.map((x) => `${x.side} ${x.shares.toFixed(1)}`).join(" · ")
       : "none open";
-    el.innerHTML = `
-      <div class="bb-portfolio-row">
-        <span class="${pnlCls}">P&L ${usd(p.pnl)}</span>
-        <span class="bb-dim">eq ${usd(p.equity)}</span>
-        <span class="bb-dim">${p.n_positions} pos</span>
+
+    paperPanel.innerHTML = `
+      <div class="bb-section-label">Paper Trading</div>
+      <div class="bb-panel-grid">
+        <div>
+          <div class="bb-portfolio-row">
+            <span class="${pnlCls}" style="font-size:15px;font-weight:650">P&L ${usd(p.pnl)}</span>
+            <span class="bb-dim">eq ${usd(p.equity)}</span>
+          </div>
+          <div class="bb-pos-detail">${posDetail}</div>
+        </div>
+        <div class="bb-panel-stats">
+          <span class="bb-dim">closed: ${p.closed_trades} (${p.wins}W / ${p.losses}L)</span>
+          <span class="bb-dim">realized: ${usd(p.realized_pnl)}</span>
+        </div>
       </div>
-      <div class="bb-pos-detail">${posDetail}</div>`;
+      <div class="bb-status-line">
+        <span class="bb-status-dot ${p.active ? "bb-live" : "bb-idle"}"></span>
+        <span class="bb-dim">${p.active ? "running" : "idle"}</span>
+        <span class="bb-grow"></span>
+      </div>`;
+
+    livePanel.innerHTML = `
+      <div class="bb-section-label">Live Trading</div>
+      <div class="bb-dim" style="padding:6px 0">not available (paper mode)</div>`;
   }
 
   function renderControls(s) {
-    const el = document.getElementById("bb-controls");
+    const paperPanel = document.getElementById("bb-paper-panel");
     const running = s && s.running;
-    el.style.display = "block";
-    el.innerHTML = `
-      <div class="bb-status-line">
-        <span class="bb-status-dot ${running ? "bb-live" : "bb-idle"}"></span>
-        <span class="bb-dim">${running ? "paper · " + s.ticks + " ticks" : "paper idle"}</span>
-        <span class="bb-grow"></span>
-        ${running
-          ? `<button class="bb-btn bb-btn-stop" id="bb-stop">stop</button>`
-          : `<button class="bb-btn bb-btn-start" id="bb-start">start</button>`}
-      </div>`;
+    const existingBtn = paperPanel.querySelector(".bb-btn");
+    if (existingBtn) return; // already rendered
+    paperPanel.insertAdjacentHTML("beforeend",
+      running
+        ? `<button class="bb-btn bb-btn-stop" id="bb-stop">stop paper</button>`
+        : `<button class="bb-btn bb-btn-start" id="bb-start">start paper</button>`
+    );
     const startBtn = document.getElementById("bb-start");
     const stopBtn = document.getElementById("bb-stop");
     if (startBtn) {
@@ -158,8 +192,9 @@
     document.getElementById("bb-msg").textContent = msg;
     document.getElementById("bb-msg").style.display = "block";
     document.getElementById("bb-markets").innerHTML = "";
-    document.getElementById("bb-portfolio").style.display = "none";
-    document.getElementById("bb-controls").style.display = "none";
+    document.getElementById("bb-tabs").style.display = "none";
+    document.getElementById("bb-paper-panel").innerHTML = "";
+    document.getElementById("bb-live-panel").innerHTML = "";
   }
 
   function render(res) {
@@ -179,7 +214,7 @@
     }
 
     const volAnnual = s.markets && s.markets[0] ? s.markets[0].vol_annual : null;
-    renderPortfolio(s.portfolio);
+    renderPortfolio(s.portfolio, s.mode);
     renderControls(s);
     renderMarkets(s.markets, volAnnual);
   }

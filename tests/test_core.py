@@ -229,6 +229,75 @@ def test_risk_refuses_stale_window():
 # -- market parsing --------------------------------------------------
 
 
+# -- always_trade strategy -------------------------------------------
+
+def test_always_trade_fires_on_every_window():
+    from btcbot.strategies.always_trade import AlwaysTradeStrategy
+
+    strat = AlwaysTradeStrategy(direction="up", assumed_edge=0.06)
+    snap = make_snapshot(p_up=0.55, volume=0)
+    sig = strat.decide(snap)
+    assert sig is not None
+    assert sig.side == UP
+    assert sig.prob == pytest.approx(min(0.99, 0.55 + 0.06))
+
+
+def test_always_trade_follow_favoured():
+    from btcbot.strategies.always_trade import AlwaysTradeStrategy
+
+    strat = AlwaysTradeStrategy(direction="follow", assumed_edge=0.06)
+    snap = make_snapshot(p_up=0.55, volume=0)  # market favours Up
+    sig = strat.decide(snap)
+    assert sig is not None
+    assert sig.side == UP
+
+    snap2 = make_snapshot(p_up=0.45, volume=0)  # market favours Down
+    sig2 = strat.decide(snap2)
+    assert sig2 is not None
+    assert sig2.side == DOWN
+
+
+def test_always_trade_fade():
+    from btcbot.strategies.always_trade import AlwaysTradeStrategy
+
+    strat = AlwaysTradeStrategy(direction="fade", assumed_edge=0.06)
+    snap = make_snapshot(p_up=0.55, volume=0)
+    sig = strat.decide(snap)
+    assert sig is not None
+    assert sig.side == DOWN  # fades the favourite
+
+
+def test_always_trade_registered():
+    from btcbot.strategies import REGISTRY, build_strategy
+
+    assert "always_trade" in REGISTRY
+    s = build_strategy("always_trade", {"direction": "up", "assumed_edge": 0.06})
+    assert s is not None
+    assert s.decide(make_snapshot(volume=0)) is not None
+
+
+def test_always_trade_no_market_price_returns_none():
+    from btcbot.strategies.always_trade import AlwaysTradeStrategy
+
+    strat = AlwaysTradeStrategy()
+    # No bids or asks -> market_implied_up returns None
+    empty_book = Book(bids=[], asks=[])
+    snap = Snapshot(
+        ts=1000.0,
+        market=Market(
+            condition_id="x", slug="t", question="?", up_token_id="u",
+            down_token_id="d", start_ts=0, end_ts=2000, strike=100_000,
+        ),
+        up_book=empty_book,
+        down_book=empty_book,
+        spot=100_000.0,
+    )
+    assert strat.decide(snap) is None
+
+
+# -- market parsing --------------------------------------------------
+
+
 def test_parse_strike_reads_price_to_beat():
     assert parse_strike("Will BTC be above $109,412.55 at 3pm?") == pytest.approx(109_412.55)
 

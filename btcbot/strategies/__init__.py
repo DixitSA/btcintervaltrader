@@ -4,11 +4,13 @@ from __future__ import annotations
 
 from typing import Any
 
+from .always_trade import AlwaysTradeStrategy
 from .base import Signal, Strategy
 from .edge_threshold import EdgeThresholdStrategy
 from .volume_threshold import VolumeThresholdStrategy
 
 REGISTRY: dict[str, type[Strategy]] = {
+    AlwaysTradeStrategy.name: AlwaysTradeStrategy,
     VolumeThresholdStrategy.name: VolumeThresholdStrategy,
     EdgeThresholdStrategy.name: EdgeThresholdStrategy,
 }
@@ -16,6 +18,7 @@ REGISTRY: dict[str, type[Strategy]] = {
 __all__ = [
     "Signal",
     "Strategy",
+    "AlwaysTradeStrategy",
     "EdgeThresholdStrategy",
     "VolumeThresholdStrategy",
     "REGISTRY",
