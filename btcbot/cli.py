@@ -562,6 +562,8 @@ def cmd_shadow_replay(args: argparse.Namespace) -> int:
         fee_model=fee_model,
         rung_defs=rung_defs,
         enabled=True,
+        notional_usd=cfg.shadow.notional_usd,
+        directions=cfg.shadow.directions,
     )
 
     # Replay in time order, same as run_backtest.
@@ -616,7 +618,12 @@ def cmd_shadow_report(args: argparse.Namespace) -> int:
         print("Run `shadow-replay` or record with `shadow.enabled: true`.", file=sys.stderr)
         return 1
 
-    from .shadow import DIRECTIONS, ShadowLedger, assert_no_history_in_ranking
+    from .shadow import (
+        DIRECTIONS,
+        ShadowLedger,
+        assert_no_history_in_ranking,
+        ranking_records,
+    )
 
     ledger = ShadowLedger(ledger_path=ledger_path, enabled=True)
     records = ledger.load_records()
@@ -625,6 +632,14 @@ def cmd_shadow_report(args: argparse.Namespace) -> int:
         return 0
 
     settled = [r for r in records if r.won is not None]
+    n_history = len(settled) - len(ranking_records(settled))
+    settled = ranking_records(settled)
+    if n_history:
+        print(
+            f"excluding {n_history} history-sourced records "
+            "(no book data -- calibration only)",
+            file=sys.stderr,
+        )
     if not settled:
         print("No settled records yet. Wait for windows to expire.", file=sys.stderr)
         return 0
@@ -645,13 +660,13 @@ def cmd_shadow_report(args: argparse.Namespace) -> int:
     print(f"{'rung':>4} {'dir':<8} {'windows':>8} {'records':>8} {'win%':>7} {'mean P&L':>9} {'LCB95':>8} {'diff r0':>8}")
     print("-" * 68)
 
-    # Baseline for paired diff: rung 0 net_pnl per window
-    r0_by_window: dict[str, float] = {}
-    for k, recs in groups.items():
-        rung, direction = k
+    # Baseline for paired diff: rung 0 net_pnl per (window, direction). Keying
+    # on slug alone would let a fade baseline be subtracted from a follow rung.
+    r0_by_window: dict[tuple[str, str], float] = {}
+    for (rung, direction), recs in groups.items():
         if rung == 0:
             for r in recs:
-                r0_by_window[r.slug] = r.net_pnl
+                r0_by_window[(r.slug, r.direction)] = r.net_pnl
 
     for rung in sorted({k[0] for k in groups}):
         for direction in sorted(DIRECTIONS):
@@ -686,7 +701,7 @@ def cmd_shadow_report(args: argparse.Namespace) -> int:
             paired_diffs = []
             if rung > 0:
                 for r in recs:
-                    r0_pnl = r0_by_window.get(r.slug)
+                    r0_pnl = r0_by_window.get((r.slug, r.direction))
                     if r0_pnl is not None:
                         paired_diffs.append(r.net_pnl - r0_pnl)
             paired_str = ""

@@ -367,7 +367,12 @@ class PaperSession:
         import math
         from collections import defaultdict
 
-        from .shadow import DIRECTIONS, ShadowLedger, assert_no_history_in_ranking
+        from .shadow import (
+            DIRECTIONS,
+            ShadowLedger,
+            assert_no_history_in_ranking,
+            ranking_records,
+        )
 
         ledger_path = Path(self.cfg.data_dir) / (self.cfg.shadow.ledger_file or "shadow.jsonl")
         if not ledger_path.exists():
@@ -375,7 +380,7 @@ class PaperSession:
 
         ledger = ShadowLedger(ledger_path=ledger_path, enabled=True)
         records = ledger.load_records()
-        settled = [r for r in records if r.won is not None]
+        settled = ranking_records([r for r in records if r.won is not None])
         if not settled:
             return []
 
@@ -388,12 +393,13 @@ class PaperSession:
             groups[key].append(r)
             windows_per_rung[key].add(r.slug)
 
-        r0_by_window: dict[str, float] = {}
-        for k, recs in groups.items():
-            rung, direction = k
+        # Keyed on (window, direction): keying on slug alone would let a fade
+        # baseline be subtracted from a follow rung.
+        r0_by_window: dict[tuple[str, str], float] = {}
+        for (rung, direction), recs in groups.items():
             if rung == 0:
                 for r in recs:
-                    r0_by_window[r.slug] = r.net_pnl
+                    r0_by_window[(r.slug, r.direction)] = r.net_pnl
 
         rows = []
         for rung in sorted({k[0] for k in groups}):
@@ -425,7 +431,11 @@ class PaperSession:
 
                 paired_diff = None
                 if rung > 0:
-                    diffs = [r.net_pnl - r0_by_window.get(r.slug, 0.0) for r in recs if r.slug in r0_by_window]
+                    diffs = [
+                        r.net_pnl - r0_by_window[(r.slug, r.direction)]
+                        for r in recs
+                        if (r.slug, r.direction) in r0_by_window
+                    ]
                     if diffs:
                         paired_diff = sum(diffs) / len(diffs)
 

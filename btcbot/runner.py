@@ -94,6 +94,8 @@ class Runner:
                 fee_model=self.fee_model,
                 rung_defs=rung_defs,
                 enabled=sc.enabled,
+                notional_usd=sc.notional_usd,
+                directions=sc.directions,
             )
 
     def close(self) -> None:

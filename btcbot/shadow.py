@@ -131,12 +131,16 @@ class ShadowLedger:
         fee_model=None,
         rung_defs: Optional[list[tuple[int, float, float]]] = None,
         enabled: bool = True,
+        notional_usd: float = 1.0,
+        directions: Optional[list[str]] = None,
     ):
         self.path = Path(ledger_path) if ledger_path else None
         self.producer = producer
         self.fee_model = fee_model
         self.rung_defs = rung_defs or RUNG_DEFS
         self.enabled = enabled
+        self.notional_usd = float(notional_usd)
+        self.directions = list(directions) if directions else list(DIRECTIONS)
 
         if producer == "history" and self.path:
             self._assert_history_path()
@@ -194,7 +198,7 @@ class ShadowLedger:
         slug = snap.market.slug
         records: list[ShadowRecord] = []
 
-        for direction in DIRECTIONS:
+        for direction in self.directions:
             if self.already_recorded(slug, rung, direction):
                 continue
 
@@ -213,8 +217,8 @@ class ShadowLedger:
             spread = book.spread
             depth = sum(lv.price * lv.size for lv in book.asks)
 
-            # Fixed $1 notional
-            contracts = 1.0 / ask
+            # Fixed notional so records are comparable across rungs
+            contracts = self.notional_usd / ask
 
             avg_price = book.sweep_cost(contracts)
             if avg_price is None:
@@ -287,13 +291,20 @@ class ShadowLedger:
 
             won = (winning_side == rec.side) if winning_side is not None else None
 
+            # P&L is for the WHOLE position (rec.contracts contracts), not per
+            # contract. rec.fee is already the position-wide fee, so mixing a
+            # per-contract gross with a position-wide fee understates cost --
+            # and understates it most at cheap entries, where contracts is
+            # largest. That biases exactly the rung comparison this ledger
+            # exists to make.
             fill = rec.fill_price or 0.0
+            qty = rec.contracts or 0.0
             if won is True:
-                gross_pnl = 1.0
-                net_pnl = 1.0 - fill - rec.fee
+                gross_pnl = qty * (1.0 - fill)
+                net_pnl = gross_pnl - rec.fee
             elif won is False:
-                gross_pnl = 0.0
-                net_pnl = -fill - rec.fee
+                gross_pnl = -(qty * fill)
+                net_pnl = gross_pnl - rec.fee
             else:
                 gross_pnl = 0.0
                 net_pnl = 0.0
@@ -403,9 +414,28 @@ class ShadowLedger:
 # -- Firewall assertions (Phase 0.2) --------------------------------------
 
 
+def ranking_records(records: list[ShadowRecord]) -> list[ShadowRecord]:
+    """Records eligible for net-P&L ranking: those with real book data.
+
+    History-sourced records have no spread or depth, so their fills are
+    assumptions rather than observations. They answer calibration only. Call
+    this before any P&L ranking; it is the firewall.
+    """
+    return [r for r in records if r.producer != "history"]
+
+
 def assert_no_history_in_ranking(records: list[ShadowRecord]) -> None:
-    """Enforce that history-sourced records never enter net-P&L ranking."""
+    """Enforce that history-sourced records never enter net-P&L ranking.
+
+    Raises if a history record is present at all -- a history record with a
+    plausible-looking spread would otherwise pass a schema-shape check and be
+    ranked on a fill price nobody ever observed.
+    """
     for r in records:
+        assert r.producer != "history", (
+            f"history record {r.slug} r{r.rung} reached net-P&L ranking; "
+            "filter with ranking_records() first"
+        )
         if r.producer == "history":
             assert r.spread is None, f"history record {r.slug} r{r.rung} has non-null spread"
             assert r.depth is None, f"history record {r.slug} r{r.rung} has non-null depth"

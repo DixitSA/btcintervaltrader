@@ -18,6 +18,7 @@ from btcbot.shadow import (
     _follow_side,
     _rung_for,
     assert_no_history_in_ranking,
+    ranking_records,
 )
 
 
@@ -165,8 +166,10 @@ def test_settle_marks_won(ledger_path):
     settled = ledger.settle("w1", "Up", 105_000.0, 2000.0)
     assert len(settled) == 1
     assert settled[0].won is True
-    assert settled[0].gross_pnl == 1.0
-    assert settled[0].net_pnl == pytest.approx(1.0 - 0.90 - 0.01)
+    # Position-wide: 1.111 contracts each returning (1 - 0.90), less the
+    # position-wide fee. NOT per-contract -- see ShadowLedger.settle.
+    assert settled[0].gross_pnl == pytest.approx(1.111 * 0.10)
+    assert settled[0].net_pnl == pytest.approx(1.111 * 0.10 - 0.01)
     assert settled[0].margin_bps == pytest.approx(0.05)
 
 
@@ -177,8 +180,9 @@ def test_settle_marks_loss(ledger_path):
     settled = ledger.settle("w2", "Up", 102_000.0, 3000.0)
     assert len(settled) == 1
     assert settled[0].won is False
-    assert settled[0].gross_pnl == 0.0
-    assert settled[0].net_pnl == pytest.approx(-0.40 - 0.02)
+    # Losing 2.5 contracts bought at 0.40 costs the full 1.00 stake, not 0.40.
+    assert settled[0].gross_pnl == pytest.approx(-(2.5 * 0.40))
+    assert settled[0].net_pnl == pytest.approx(-(2.5 * 0.40) - 0.02)
 
 
 def test_settle_void_on_no_winner(ledger_path):
@@ -193,7 +197,10 @@ def test_settle_void_on_no_winner(ledger_path):
 
 def test_persist_and_reload(ledger_path):
     ledger = ShadowLedger(ledger_path=ledger_path, enabled=True)
-    rec = ShadowRecord(slug="w1", rung=0, direction="follow", side="Up", fill_price=0.90, fee=0.01)
+    rec = ShadowRecord(
+        slug="w1", rung=0, direction="follow", side="Up",
+        fill_price=0.90, fee=0.01, contracts=1.111,
+    )
     ledger.append(rec)
     settled = ledger.settle("w1", "Up", 105_000.0, 2000.0)
     for s in settled:
@@ -204,7 +211,7 @@ def test_persist_and_reload(ledger_path):
     recs = ledger2.load_records()
     assert len(recs) == 1
     assert recs[0].won is True
-    assert recs[0].net_pnl == pytest.approx(1.0 - 0.90 - 0.01)
+    assert recs[0].net_pnl == pytest.approx(1.111 * 0.10 - 0.01)
 
 
 def test_settle_only_unsettled(ledger_path):
@@ -314,3 +321,21 @@ def test_no_history_in_ranking_raises_on_violation():
     ]
     with pytest.raises(AssertionError):
         assert_no_history_in_ranking(records)
+
+
+def test_wellformed_history_record_still_barred_from_ranking():
+    """A history record with null spread/depth is the NORMAL case. It must
+    still be barred -- its fill price was assumed, never observed."""
+    records = [
+        ShadowRecord(slug="w1", rung=0, direction="follow", producer="history"),
+    ]
+    with pytest.raises(AssertionError):
+        assert_no_history_in_ranking(records)
+
+
+def test_ranking_records_filters_history():
+    live = ShadowRecord(slug="w1", rung=0, direction="follow", producer="live", spread=0.02)
+    hist = ShadowRecord(slug="w1", rung=0, direction="follow", producer="history")
+    kept = ranking_records([live, hist])
+    assert kept == [live]
+    assert_no_history_in_ranking(kept)
