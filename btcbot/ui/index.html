@@ -44,17 +44,19 @@
   button:disabled { opacity: .4; cursor: not-allowed; }
   button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
   button.primary:hover:not(:disabled) { color: #fff; filter: brightness(1.1); }
-  main { padding: 20px; display: grid; gap: 16px; max-width: 1400px; margin: 0 auto; }
-  .row { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+  main { padding: 14px 20px; display: grid; gap: 12px; max-width: 1400px; margin: 0 auto; }
+  .row { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
   .card {
     background: var(--panel); border: 1px solid var(--line);
-    border-radius: 10px; padding: 14px 16px;
+    border-radius: 10px; padding: 12px 14px;
   }
+  summary { cursor: pointer; }
+  summary::marker { color: var(--dim); }
   .card h2 {
     font-size: 11px; text-transform: uppercase; letter-spacing: .08em;
     color: var(--dim); margin: 0 0 10px; font-weight: 600;
   }
-  .big { font-size: 26px; font-weight: 650; font-variant-numeric: tabular-nums; }
+  .big { font-size: 23px; font-weight: 650; font-variant-numeric: tabular-nums; }
   .sub { color: var(--dim); font-size: 12px; margin-top: 2px; }
   table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
   th, td { text-align: right; padding: 7px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
@@ -66,7 +68,12 @@
   tbody tr:last-child td { border-bottom: none; }
   .up { color: var(--up); } .down { color: var(--down); } .dim { color: var(--dim); }
   .warn { color: var(--warn); }
-  .scroll { overflow-x: auto; }
+  /* Cap tall tables and keep headers visible instead of letting the page grow
+     past the viewport -- the panel is glanceable or it is useless. */
+  .scroll { overflow-x: auto; overflow-y: auto; max-height: 46vh; }
+  .scroll thead th {
+    position: sticky; top: 0; background: var(--panel); z-index: 1;
+  }
   .held { color: var(--accent); font-weight: 650; }
   pre.log {
     margin: 0; max-height: 190px; overflow: auto; font-size: 12px;
@@ -79,6 +86,36 @@
   .err { border-left-color: var(--down); color: var(--down); }
   .bar { height: 5px; background: var(--line); border-radius: 3px; overflow: hidden; margin-top: 8px; }
   .bar > div { height: 100%; background: var(--accent); }
+
+  /* paper / live screens */
+  .tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--line); }
+  .tab {
+    font-size: 13px; font-weight: 600; padding: 8px 16px; border: none;
+    background: transparent; color: var(--dim); border-radius: 0;
+    border-bottom: 2px solid transparent; margin-bottom: -1px;
+  }
+  .tab:hover:not(:disabled) { color: var(--text); }
+  .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+  .screen { display: grid; gap: 12px; }
+
+  /* unit size + would-have-made */
+  .unit-bar { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+  .unit-btn { padding: 3px 10px; font-size: 15px; line-height: 1.2; }
+  .unit-val { font-weight: 650; font-variant-numeric: tabular-nums; min-width: 46px; text-align: center; }
+  .would {
+    padding: 12px 14px; border-radius: 8px; border: 1px solid var(--line);
+    background: color-mix(in srgb, var(--accent) 6%, transparent); margin-bottom: 12px;
+  }
+  .would .big { font-size: 24px; }
+  .unproven { color: var(--warn); font-size: 12px; margin-top: 6px; line-height: 1.45; }
+  .caveat { color: var(--dim); font-size: 11.5px; line-height: 1.5; margin-top: 10px; }
+  .live-off { padding: 16px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel); }
+  .live-off b { color: var(--text); }
+  .live-on {
+    padding: 10px 14px; border-radius: 8px; font-weight: 700; letter-spacing: .04em;
+    background: color-mix(in srgb, var(--down) 14%, transparent);
+    color: var(--down); border: 1px solid var(--down); margin-bottom: 12px;
+  }
 </style>
 </head>
 <body>
@@ -92,13 +129,21 @@
 </header>
 
 <main>
-  <div class="note">
-    Paper trading only — this panel has no code path that places a real order.
-    Model edge is only as good as the volatility behind it; the strategy declines
-    to trade until it has measured one.
+  <div class="tabs">
+    <button class="tab active" data-screen="paper">Paper</button>
+    <button class="tab" data-screen="live">Live</button>
   </div>
+
+  <div class="screen" id="paper-screen">
   <div id="error"></div>
-  <div id="strategy" class="note" style="display:none"></div>
+  <details class="note" id="about">
+    <summary>Paper trading only — no code path here places a real order.</summary>
+    <div style="margin-top:8px">
+      Model edge is only as good as the volatility behind it; the strategy
+      declines to trade until it has measured one.
+    </div>
+    <div id="strategy" style="margin-top:8px"></div>
+  </details>
 
   <div class="row">
     <div class="card">
@@ -139,13 +184,39 @@
   </div>
 
   <div class="card">
-    <h2>Session log</h2>
-    <pre class="log" id="log">—</pre>
+    <h2>Shadow ledger — what would I have made?</h2>
+    <div class="unit-bar">
+      <span class="dim">unit size</span>
+      <button class="unit-btn" id="unit-dec">–</button>
+      <span class="unit-val" id="unit-val">$5</span>
+      <button class="unit-btn" id="unit-inc">+</button>
+      <span class="dim">per trade</span>
+      <span class="grow"></span>
+      <span class="dim" id="shadow-summary">—</span>
+      <button id="shadow-replay">replay from snapshots</button>
+    </div>
+    <div id="shadow-body"><div class="dim">loading…</div></div>
+  </div>
+
+  <details class="card">
+    <summary><h2 style="display:inline;margin:0">Session log</h2></summary>
+    <pre class="log" id="log" style="margin-top:10px">—</pre>
+  </details>
+  </div><!-- /paper-screen -->
+
+  <div class="screen" id="live-screen" style="display:none">
+    <div id="live-body"></div>
   </div>
 </main>
 
 <script>
 const $ = (id) => document.getElementById(id);
+
+// Rewriting identical DOM every 2s repaints the page, drops table scroll
+// position, and kills text selection mid-read. Write only on change.
+const setText = (el, v) => { if (el && el.textContent !== v) el.textContent = v; };
+const setHTML = (el, v) => { if (el && el.innerHTML !== v) el.innerHTML = v; };
+const setCls  = (el, v) => { if (el && el.className !== v) el.className = v; };
 const pct = (v) => v == null ? "—" : (v * 100).toFixed(1) + "%";
 const p3  = (v) => v == null ? "—" : v.toFixed(3);
 const usd = (v) => v == null ? "—" : (v < 0 ? "-$" : "$") + Math.abs(v).toFixed(2);
@@ -165,13 +236,167 @@ async function post(path) {
 $("start").onclick = () => post("/api/paper/start");
 $("stop").onclick  = () => post("/api/paper/stop");
 
+// -- paper / live screens -------------------------------------------------
+
+document.querySelector(".tabs").addEventListener("click", (e) => {
+  const tab = e.target.closest(".tab");
+  if (!tab) return;
+  document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("active", t === tab));
+  const want = tab.dataset.screen;
+  $("paper-screen").style.display = want === "paper" ? "" : "none";
+  $("live-screen").style.display  = want === "live" ? "" : "none";
+});
+
+function renderLive(s) {
+  const p = s.portfolio || {};
+  if (s.mode !== "live") {
+    setHTML($("live-body"), `
+      <div class="live-off">
+        <div style="font-weight:650;margin-bottom:6px">Not trading real money</div>
+        <div class="dim">config mode: <b>${s.mode || "paper"}</b></div>
+        <div class="dim" style="margin-top:8px">
+          Live requires <b>mode: live</b> in config.yaml and
+          <b>BTCBOT_I_UNDERSTAND_REAL_MONEY=yes</b> in the environment.
+        </div>
+        <div class="dim" style="margin-top:8px">
+          This panel has no code path that places a real order, in either mode.
+        </div>
+      </div>`);
+    return;
+  }
+  setHTML($("live-body"), `
+    <div class="live-on">REAL MONEY — mode: live</div>
+    <div class="row">
+      <div class="card">
+        <h2>Live P&amp;L</h2>
+        <div class="big ${p.pnl > 0 ? "up" : p.pnl < 0 ? "down" : ""}">${usd(p.pnl)}</div>
+        <div class="sub">equity ${usd(p.equity)} of ${usd(p.starting_cash)}</div>
+      </div>
+      <div class="card">
+        <h2>Closed trades</h2>
+        <div class="big">${p.closed_trades ?? 0}</div>
+        <div class="sub">${p.wins ?? 0}W / ${p.losses ?? 0}L · realized ${usd(p.realized_pnl)}</div>
+      </div>
+    </div>`);
+}
+
+// -- shadow ledger --------------------------------------------------------
+
+const RUNG_LABEL = { 0: "≤2m", 1: "≤4m", 2: "≤7m", 3: "≤15m" };
+const UNIT_STEPS = [1, 2, 5, 10, 25, 50, 100];
+let unitUsd = Number(localStorage.getItem("btcbot-unit-usd")) || 5;
+let shadowRows = null;
+let shadowStatus = null;
+let replayBusy = false;
+
+// Records are logged at a fixed notional; P&L is linear in notional, so this
+// rescale is exact rather than an estimate.
+const scaleToUnit = (r) => (r.total_net_pnl / (r.notional_usd || 1)) * unitUsd;
+
+function stepUnit(dir) {
+  const i = UNIT_STEPS.indexOf(unitUsd);
+  const cur = i === -1 ? UNIT_STEPS.indexOf(5) : i;
+  unitUsd = UNIT_STEPS[Math.max(0, Math.min(UNIT_STEPS.length - 1, cur + dir))];
+  try { localStorage.setItem("btcbot-unit-usd", String(unitUsd)); } catch (e) {}
+  renderShadow();
+}
+$("unit-inc").onclick = () => stepUnit(1);
+$("unit-dec").onclick = () => stepUnit(-1);
+
+$("shadow-replay").onclick = async () => {
+  if (replayBusy) return;
+  replayBusy = true;
+  $("shadow-replay").disabled = true;
+  $("shadow-replay").textContent = "replaying…";
+  try { await fetch("/api/shadow/replay", { method: "POST" }); } catch (e) {}
+  replayBusy = false;
+  $("shadow-replay").disabled = false;
+  $("shadow-replay").textContent = "replay from snapshots";
+  refreshShadow();
+};
+
+function renderShadow() {
+  setText($("unit-val"), "$" + unitUsd);
+  const box = $("shadow-body");
+
+  setText($("shadow-summary"), shadowStatus && shadowStatus.exists
+    ? `${shadowStatus.records} records · ${shadowStatus.settled} settled · ${shadowStatus.windows} windows`
+    : "no shadow data");
+
+  if (!shadowRows || !shadowRows.length) {
+    setHTML(box, '<div class="dim">No settled shadow records yet. '
+      + 'Run a replay, or let paper trading settle some windows.</div>');
+    return;
+  }
+
+  // Rank on LCB95, not raw dollars. One longshot win at a 1c entry returns
+  // ~100x notional and would otherwise top the table forever on a handful of
+  // windows.
+  const best = shadowRows.slice().sort((a, b) => b.lcb95 - a.lcb95)[0];
+  const bestUsd = scaleToUnit(best);
+  const proven = best.lcb95 > 0;
+
+  let html = `<div class="would">
+    <div class="dim" style="font-size:12px">best strategy so far (ranked by LCB₉₅)</div>
+    <div class="big ${!proven ? "dim" : bestUsd > 0 ? "up" : "down"}">${usd(bestUsd)}</div>
+    <div class="sub">${RUNG_LABEL[best.rung] || best.rung} · ${best.direction}
+      · ${best.windows} windows · ${(best.win_rate * 100).toFixed(1)}% win rate
+      · at ${usd(unitUsd)} per trade</div>
+    ${proven ? "" : `<div class="unproven">Not statistically real yet — LCB₉₅ is
+      ${best.lcb95.toFixed(3)}. Treat this figure as noise, not as money.</div>`}
+    ${best.windows < 100 ? `<div class="unproven">${best.windows} windows recorded.
+      Needs 100+ before any of this means anything.</div>` : ""}
+  </div>`;
+
+  html += `<div class="scroll"><table>
+    <thead><tr>
+      <th>rung</th><th>direction</th><th>windows</th><th>win%</th>
+      <th>at $${unitUsd}/trade</th><th>mean P&L ($1)</th><th>LCB₉₅</th><th>vs rung 0</th>
+    </tr></thead><tbody>`;
+  for (const r of shadowRows) {
+    const d = scaleToUnit(r);
+    html += `<tr>
+      <td>${RUNG_LABEL[r.rung] || r.rung}</td>
+      <td>${r.direction}</td>
+      <td class="dim">${r.windows}</td>
+      <td class="${r.win_rate > 0.5 ? "up" : "down"}">${(r.win_rate * 100).toFixed(1)}%</td>
+      <td class="${d > 0 ? "up" : d < 0 ? "down" : ""}"><b>${usd(d)}</b></td>
+      <td class="dim">${r.mean_net_pnl.toFixed(4)}</td>
+      <td class="${r.lcb95 > 0 ? "up" : "down"}">${r.lcb95.toFixed(4)}</td>
+      <td class="${r.paired_diff_r0 > 0 ? "up" : r.paired_diff_r0 < 0 ? "down" : "dim"}">
+        ${r.paired_diff_r0 == null ? "—" : r.paired_diff_r0.toFixed(4)}</td>
+    </tr>`;
+  }
+  html += `</tbody></table></div>`;
+  html += `<div class="caveat">
+    Each row is a <b>separate</b> strategy — you cannot run follow and fade, or
+    several rungs, on the same window, so these figures must not be added up.
+    Sample size is <b>windows</b>, not records: rungs within one window share a
+    single BTC path and are not independent observations.
+  </div>`;
+
+  setHTML(box, html);
+}
+
+async function refreshShadow() {
+  try {
+    const [st, rep] = await Promise.all([
+      fetch("/api/shadow/status").then((r) => r.json()).catch(() => null),
+      fetch("/api/shadow/report").then((r) => r.json()).catch(() => null),
+    ]);
+    shadowStatus = st;
+    shadowRows = Array.isArray(rep) ? rep : (rep && rep.rows) || null;
+  } catch (e) {}
+  renderShadow();
+}
+
 function renderMarkets(rows) {
   const tb = $("markets");
   if (!rows || !rows.length) {
-    tb.innerHTML = '<tr><td colspan="10" class="dim">no open windows in range</td></tr>';
+    setHTML(tb, '<tr><td colspan="10" class="dim">no open windows in range</td></tr>');
     return;
   }
-  tb.innerHTML = rows.map((m) => {
+  setHTML(tb, rows.map((m) => {
     let edgeCell = '<span class="dim">—</span>';
     if (m.edge != null) {
       const cls = m.edge > 0 ? "up" : "down";
@@ -198,7 +423,7 @@ function renderMarkets(rows) {
       <td>${beCell}</td>
       <td>${num(m.volume)}</td>
     </tr>`;
-  }).join("");
+  }).join(""));
 }
 
 async function refresh() {
@@ -211,14 +436,13 @@ async function refresh() {
     return;
   }
 
-  $("mode").textContent = `${s.venue} · ${s.strategy} · ${s.mode}`;
-  $("status").textContent = s.running ? `running · ${s.ticks} ticks` : "idle";
-  $("status").className = "pill " + (s.running ? "on" : "off");
+  setText($("mode"), `${s.venue} · ${s.strategy} · ${s.mode}`);
+  setText($("status"), s.running ? `running · ${s.ticks} ticks` : "idle");
+  setCls($("status"), "pill " + (s.running ? "on" : "off"));
   $("start").disabled = s.running;
   $("stop").disabled = !s.running;
 
-  $("error").innerHTML = s.last_error
-    ? `<div class="note err">${s.last_error}</div>` : "";
+  setHTML($("error"), s.last_error ? `<div class="note err">${s.last_error}</div>` : "");
 
   // Explain silence. Several honest defaults decline every trade, and without
   // saying so a running session that never trades just looks broken.
@@ -232,41 +456,49 @@ async function refresh() {
         + "because you want trades.";
   }
   const el = $("strategy");
-  el.style.display = "block";
-  el.textContent = `strategy: ${s.strategy}${bits ? " (" + bits + ")" : ""}${why}`;
+  setText(el, `strategy: ${s.strategy}${bits ? " (" + bits + ")" : ""}${why}`);
 
   const p = s.portfolio || {};
   if (p.active) {
-    $("pnl").textContent = usd(p.pnl);
-    $("pnl").className = "big " + (p.pnl > 0 ? "up" : p.pnl < 0 ? "down" : "");
-    $("equity").textContent = `equity ${usd(p.equity)} of ${usd(p.starting_cash)}`;
-    $("npos").textContent = p.n_positions;
-    $("posdetail").textContent = (p.positions || []).length
+    setText($("pnl"), usd(p.pnl));
+    setCls($("pnl"), "big " + (p.pnl > 0 ? "up" : p.pnl < 0 ? "down" : ""));
+    setText($("equity"), `equity ${usd(p.equity)} of ${usd(p.starting_cash)}`);
+    setText($("npos"), String(p.n_positions));
+    setText($("posdetail"), (p.positions || []).length
       ? p.positions.map((x) => `${x.side} ${x.shares.toFixed(1)} @ ${x.entry_price.toFixed(3)}`).join(" · ")
-      : "none open";
+      : "none open");
   } else {
-    $("pnl").textContent = "—";
-    $("pnl").className = "big";
-    $("equity").textContent = "not started";
-    $("npos").textContent = "—";
-    $("posdetail").textContent = "start paper trading to track positions";
+    setText($("pnl"), "—");
+    setCls($("pnl"), "big");
+    setText($("equity"), "not started");
+    setText($("npos"), "—");
+    setText($("posdetail"), "start paper trading to track positions");
   }
 
   const vol = (s.markets && s.markets.length) ? s.markets[0].vol_annual : null;
-  $("vol").textContent = vol == null ? "—" : pct(vol);
+  setText($("vol"), vol == null ? "—" : pct(vol));
+
+  renderLive(s);
 
   const r = s.recorder || {};
-  $("snaps").textContent = num(r.snapshots);
-  const windows = Math.floor((r.snapshots || 0) / 450);
-  $("snapsub").textContent = `~${windows} windows · need ~${num(r.windows_needed_5pct)} for a 5% edge`;
+  setText($("snaps"), num(r.snapshots));
+  // Prefer the shadow ledger's real window count; snapshots/450 is a guess that
+  // assumes a full window at a 2s poll and drifts whenever the recorder gaps.
+  const counted = shadowStatus && shadowStatus.exists ? shadowStatus.windows : null;
+  const windows = counted != null ? counted : Math.floor((r.snapshots || 0) / 450);
+  setText($("snapsub"), `${counted != null ? "" : "~"}${windows} windows`
+    + ` · need ~${num(r.windows_needed_5pct)} for a 5% edge`);
   $("snapbar").style.width = Math.min(100, 100 * windows / (r.windows_needed_5pct || 1)) + "%";
 
   renderMarkets(s.markets);
-  $("log").textContent = (s.log || []).join("\n") || "—";
+  setText($("log"), (s.log || []).join("\n") || "—");
 }
 
 refresh();
 setInterval(refresh, 2000);
+// The report is heavier than /api/state, so poll it more slowly.
+refreshShadow();
+setInterval(refreshShadow, 15000);
 </script>
 </body>
 </html>
