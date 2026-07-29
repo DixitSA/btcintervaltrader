@@ -292,7 +292,21 @@ class Portfolio:
             out[t.exit_reason] = out.get(t.exit_reason, 0.0) + t.pnl
         return out
 
+    def log_trades(self) -> str:
+        """Print a compact trade log — side, entry→exit, P&L, outcome."""
+        if not self.closed:
+            return "(no closed trades)"
+        lines = ["", f"  TRADE LOG ({len(self.closed)} trades)"] + [
+            f"  {t.side:<4} {t.entry_price:.3f} -> {t.exit_price:.3f}  "
+            f"${t.pnl:+,.2f}  {'WON ' if t.won else 'LOST'} "
+            f"({t.exit_reason})  held {t.held_seconds:.0f}s"
+            for t in self.closed
+        ]
+        return "\n".join(lines)
+
     def render(self) -> str:
+        wins = sum(1 for t in self.closed if t.won)
+        losses = len(self.closed) - wins
         lines = [
             "-" * 58,
             "PORTFOLIO",
@@ -304,6 +318,7 @@ class Portfolio:
             f"unrealized P&L    : ${self.unrealized_pnl:+,.2f}",
             f"total P&L         : ${self.total_pnl:+,.2f} "
             f"({self.total_pnl / self.starting_cash:+.2%})",
+            f"wins/losses       : {wins}W / {losses}L",
             f"max drawdown      : ${self.max_drawdown:,.2f}",
             f"closed trades     : {len(self.closed)}",
         ]

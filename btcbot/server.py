@@ -308,14 +308,19 @@ class PaperSession:
                     "entry_price": pos.entry_price,
                 }
             )
+        wins = sum(1 for t in p.closed if t.won)
         return {
             "active": True,
             "equity": p.equity,
             "cash": getattr(p, "cash", None),
             "starting_cash": p.starting_cash,
             "pnl": p.equity - p.starting_cash,
+            "realized_pnl": p.realized_pnl,
             "positions": positions,
             "n_positions": len(positions),
+            "closed_trades": len(p.closed),
+            "wins": wins,
+            "losses": len(p.closed) - wins,
         }
 
     def recorder_dict(self) -> dict[str, Any]:
@@ -334,6 +339,180 @@ class PaperSession:
             "snapshots": lines,
             # 96 fifteen-minute windows a day; ~1,300 needed for a 5% edge.
             "windows_needed_5pct": 1283,
+        }
+
+    # -- shadow ledger --------------------------------------------------
+
+    def shadow_status_dict(self) -> dict[str, Any]:
+        """Basic shadow ledger stats for the extension panel."""
+        from .shadow import ShadowLedger
+
+        ledger_path = Path(self.cfg.data_dir) / (self.cfg.shadow.ledger_file or "shadow.jsonl")
+        if not ledger_path.exists():
+            return {"exists": False, "records": 0, "settled": 0, "windows": 0}
+        ledger = ShadowLedger(ledger_path=ledger_path, enabled=True)
+        records = ledger.load_records()
+        settled = [r for r in records if r.won is not None]
+        windows = len(set(r.slug for r in settled)) if settled else 0
+        return {
+            "exists": True,
+            "records": len(records),
+            "settled": len(settled),
+            "windows": windows,
+            "unsettled_slugs": len(ledger.unsettled_slugs()),
+        }
+
+    def shadow_report_dict(self) -> list[dict[str, Any]]:
+        """Rung x direction performance data, same computation as shadow-report."""
+        import math
+        from collections import defaultdict
+
+        from .shadow import (
+            DIRECTIONS,
+            ShadowLedger,
+            assert_no_history_in_ranking,
+            ranking_records,
+        )
+
+        ledger_path = Path(self.cfg.data_dir) / (self.cfg.shadow.ledger_file or "shadow.jsonl")
+        if not ledger_path.exists():
+            return []
+
+        ledger = ShadowLedger(ledger_path=ledger_path, enabled=True)
+        records = ledger.load_records()
+        settled = ranking_records([r for r in records if r.won is not None])
+        if not settled:
+            return []
+
+        assert_no_history_in_ranking(settled)
+
+        groups: dict[tuple[int, str], list] = defaultdict(list)
+        windows_per_rung: dict[tuple[int, str], set[str]] = defaultdict(set)
+        for r in settled:
+            key = (r.rung, r.direction)
+            groups[key].append(r)
+            windows_per_rung[key].add(r.slug)
+
+        # Keyed on (window, direction): keying on slug alone would let a fade
+        # baseline be subtracted from a follow rung.
+        r0_by_window: dict[tuple[str, str], float] = {}
+        for (rung, direction), recs in groups.items():
+            if rung == 0:
+                for r in recs:
+                    r0_by_window[(r.slug, r.direction)] = r.net_pnl
+
+        rows = []
+        for rung in sorted({k[0] for k in groups}):
+            for direction in sorted(DIRECTIONS):
+                key = (rung, direction)
+                recs = groups.get(key, [])
+                if not recs:
+                    continue
+
+                n_windows = len(windows_per_rung[key])
+                n_records = len(recs)
+                wins = sum(1 for r in recs if r.won is True)
+                win_rate = wins / n_records if n_records else 0.0
+                mean_pnl = sum(r.net_pnl for r in recs) / n_records if n_records else 0.0
+
+                pnl_by_window: dict[str, float] = defaultdict(float)
+                counts_by_window: dict[str, int] = defaultdict(int)
+                for r in recs:
+                    pnl_by_window[r.slug] += r.net_pnl
+                    counts_by_window[r.slug] += 1
+                window_means = [pnl_by_window[s] / counts_by_window[s] for s in pnl_by_window]
+                if len(window_means) >= 2:
+                    wm_mean = sum(window_means) / len(window_means)
+                    wm_var = sum((m - wm_mean) ** 2 for m in window_means) / (len(window_means) - 1)
+                    stderr = math.sqrt(wm_var / len(window_means))
+                    lcb = wm_mean - 1.645 * stderr
+                else:
+                    lcb = mean_pnl
+
+                paired_diff = None
+                if rung > 0:
+                    diffs = [
+                        r.net_pnl - r0_by_window[(r.slug, r.direction)]
+                        for r in recs
+                        if (r.slug, r.direction) in r0_by_window
+                    ]
+                    if diffs:
+                        paired_diff = sum(diffs) / len(diffs)
+
+                rows.append({
+                    "rung": rung,
+                    "direction": direction,
+                    "windows": n_windows,
+                    "records": n_records,
+                    "win_rate": round(win_rate, 4),
+                    "mean_net_pnl": round(mean_pnl, 6),
+                    "lcb95": round(lcb, 6),
+                    "paired_diff_r0": round(paired_diff, 6) if paired_diff is not None else None,
+                })
+        return rows
+
+    def run_shadow_replay(self) -> dict[str, Any]:
+        """Run shadow-replay from recorded snapshots on the server side."""
+        from .backtest import group_windows, infer_outcome
+        from .fees import build_fee_model
+        from .shadow import ShadowLedger
+        from .recorder import load_dataset
+
+        data_dir = self.cfg.data_dir
+        snapshots = load_dataset(data_dir)
+        if not snapshots:
+            return {"ok": False, "error": "no snapshots found"}
+
+        windows = group_windows(snapshots)
+        fee_model = build_fee_model(self.cfg.venue, self.cfg.fees)
+        rung_defs = [
+            (i, self.cfg.markets.min_seconds_remaining, float(max_r))
+            for i, max_r in enumerate(self.cfg.shadow.rungs)
+        ]
+        output = Path(data_dir) / (self.cfg.shadow.ledger_file or "shadow.jsonl")
+
+        ledger = ShadowLedger(
+            ledger_path=output,
+            producer="replay",
+            fee_model=fee_model,
+            rung_defs=rung_defs,
+            enabled=True,
+        )
+
+        ordered = sorted(
+            (s for w in windows.values() for s in w), key=lambda s: (s.ts, s.market.slug)
+        )
+        for snap in ordered:
+            records = ledger.evaluate(snap)
+            for rec in records:
+                ledger.append(rec)
+
+            slug = snap.market.slug
+            outcome = infer_outcome(windows[slug])
+            final_ts = windows[slug][-1].ts
+            if snap.ts >= final_ts:
+                settle_spot = snap.spot
+                settled = ledger.settle(slug, outcome, settle_spot, final_ts)
+                for s in settled:
+                    ledger.append_settled(s)
+
+        for slug in list(ledger.unsettled_slugs()):
+            if slug in windows:
+                outcome = infer_outcome(windows[slug])
+                final_ts = windows[slug][-1].ts
+                settle_spot = windows[slug][-1].spot
+                settled = ledger.settle(slug, outcome, settle_spot, final_ts)
+                for s in settled:
+                    ledger.append_settled(s)
+
+        records = ledger.load_records()
+        unsettled = sum(1 for r in records if r.won is None)
+        return {
+            "ok": True,
+            "records": len(records),
+            "unsettled": unsettled,
+            "windows": len(windows),
+            "file": str(output),
         }
 
     def state_dict(self) -> dict[str, Any]:
@@ -397,6 +576,12 @@ class Handler(BaseHTTPRequestHandler):
         if self.path.startswith("/api/state"):
             self._json(self.session.state_dict())
             return
+        if self.path == "/api/shadow/status":
+            self._json(self.session.shadow_status_dict())
+            return
+        if self.path == "/api/shadow/report":
+            self._json({"rows": self.session.shadow_report_dict()})
+            return
         if self.path in ("/", "/index.html"):
             try:
                 body = UI_PATH.read_bytes()
@@ -419,6 +604,14 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/api/paper/stop":
             self.session.stop()
             self._json({"ok": True})
+            return
+        if self.path == "/api/shadow/replay":
+            try:
+                result = self.session.run_shadow_replay()
+            except Exception as exc:  # noqa: BLE001
+                self._json({"ok": False, "error": str(exc)}, code=400)
+                return
+            self._json(result)
             return
         self._send(404, b"not found", "text/plain")
 

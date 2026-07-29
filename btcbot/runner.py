@@ -7,18 +7,21 @@ from __future__ import annotations
 
 import logging
 import time
+from pathlib import Path
 from typing import Optional
 
 from .config import Config
 from .execution import build_executor
 from .exits import DrawdownGuard, ExitPolicy
 from .fees import build_fee_model
+from .learner import Calibrator, OutcomeRecord, OutcomeStore
 from .models import Market, Order, Snapshot
 from .portfolio import Portfolio, mark_for
 from .recorder import SnapshotWriter
 from .risk import RiskManager
+from .shadow import ShadowLedger
 from .spot import SpotFeed
-from .strategies.base import Strategy
+from .strategies.base import Signal, Strategy
 from .venues import build_venue
 
 log = logging.getLogger(__name__)
@@ -56,6 +59,44 @@ class Runner:
         # slug -> window end, so families with different durations (5m/15m/1h)
         # each settle at their own expiry rather than a single global one.
         self._window_end: dict[str, float] = {}
+        # slug -> strike price, used to determine actual settlement outcome
+        # (BTC vs strike) instead of inferring from last mark.
+        self._strikes: dict[str, float] = {}
+        # slug -> signal probability at trade time, used for calibration.
+        self._signal_probs: dict[str, float] = {}
+
+        # Online calibration from observed trade outcomes.
+        self.calibrator: Optional[Calibrator] = None
+        self._outcome_store: Optional[OutcomeStore] = None
+        if cfg.learning and cfg.learning.enabled:
+            self.calibrator = Calibrator(
+                alpha_prior=cfg.learning.alpha_prior,
+                beta_prior=cfg.learning.beta_prior,
+            )
+            outcome_path = Path(cfg.data_dir) / (cfg.learning.outcome_file or "outcomes.jsonl")
+            self._outcome_store = OutcomeStore(outcome_path)
+            stored = self._outcome_store.feed(self.calibrator)
+            if stored:
+                log.info("calibrator seeded from %d past outcomes", stored)
+
+        # Shadow ledger tracks hypothetical trades at every rung x direction.
+        self.shadow: Optional[ShadowLedger] = None
+        sc = cfg.shadow
+        if sc and sc.enabled:
+            rung_defs = [
+                (i, cfg.markets.min_seconds_remaining, float(max_r))
+                for i, max_r in enumerate(sc.rungs)
+            ]
+            shadow_path = Path(cfg.data_dir) / sc.ledger_file
+            self.shadow = ShadowLedger(
+                ledger_path=shadow_path,
+                producer="live",
+                fee_model=self.fee_model,
+                rung_defs=rung_defs,
+                enabled=sc.enabled,
+                notional_usd=sc.notional_usd,
+                directions=sc.directions,
+            )
 
     def close(self) -> None:
         self.venue.close()
@@ -135,14 +176,49 @@ class Runner:
             self.portfolio.equity,
         )
 
+        # Record early exit for calibration.
+        signal_prob = self._signal_probs.pop(slug, pos.entry_price)
+        if self._outcome_store is not None and self.calibrator is not None:
+            rec = OutcomeRecord(
+                slug=slug,
+                side=pos.side,
+                signal_prob=signal_prob,
+                entry_price=pos.entry_price,
+                entry_ts=pos.entry_ts,
+                exit_ts=snap.ts,
+                outcome=pos.side if trade.pnl > 0 else None,
+                pnl=trade.pnl,
+                exit_reason=trade.exit_reason,
+            )
+            self._outcome_store.append(rec)
+            self.calibrator.observe(signal_prob, trade.pnl > 0)
+
+    def _settle_shadow_expired(self, now: float) -> None:
+        """Settle shadow records for any expired window, including those we
+        never held a real position in."""
+        if not self.shadow:
+            return
+        spot_px = self.spot.price()
+        for slug in self.shadow.unsettled_slugs():
+            end_ts = self._window_end.get(slug, 0.0)
+            if now <= end_ts + 60:
+                continue
+            strike = self._strikes.get(slug)
+            if spot_px is not None and strike is not None and strike > 0:
+                winning_side = "Up" if spot_px > strike else "Down"
+            else:
+                winning_side = None
+            settled = self.shadow.settle(slug, winning_side, spot_px, now)
+            for s in settled:
+                self.shadow.append_settled(s)
+
     def _settle_expired(self, now: float) -> None:
         """Resolve positions whose window has ended.
 
-        The venue is the authority on the outcome, and this bot does not yet
-        query it (see README, "Known gaps"). We settle from the last mark we
-        saw, which converges to 0 or 1 as a window closes, and log loudly so
-        the approximation is never silent.
+        Determines win/loss from BTC spot vs the market's strike. If the spot
+        feed or strike is unavailable, falls back to the last mark.
         """
+        spot_px = self.spot.price()
         for slug, pos in list(self.portfolio.positions.items()):
             end_ts = self._window_end.get(
                 slug, pos.entry_ts + self.cfg.markets.window_seconds
@@ -150,25 +226,58 @@ class Runner:
             if now <= end_ts + 60:
                 continue
 
-            mark = pos.last_mark if pos.last_mark is not None else pos.entry_price
-            outcome = pos.side if mark >= 0.5 else None
+            strike = self._strikes.get(slug)
+            if spot_px is not None and strike is not None and strike > 0:
+                # BTC above strike -> UP wins, below strike -> DOWN wins
+                winning_side = "Up" if spot_px > strike else "Down"
+                source = f"spot ${spot_px:,.2f} vs strike ${strike:,.2f}"
+            else:
+                # Fallback: use last mark (converges to 0 or 1 near expiry)
+                mark = pos.last_mark if pos.last_mark is not None else pos.entry_price
+                winning_side = pos.side if mark >= 0.5 else None
+                source = f"last mark {mark:.3f} (APPROXIMATE)"
+
             trade = self.portfolio.settle(
-                slug, outcome, now, fee_model=self.fee_model
+                slug, winning_side, now, fee_model=self.fee_model
             )
             self.risk.on_settlement(trade.pnl)
             log.info(
-                "%s: settled from last mark %.3f -> P&L $%+.2f (APPROXIMATE; "
-                "reconcile against the venue) | equity $%.2f",
+                "%s: settled %s -> P&L $%+.2f (%s) | equity $%.2f",
                 slug,
-                mark,
+                source,
                 trade.pnl,
+                "won" if trade.pnl > 0 else "lost",
                 self.portfolio.equity,
             )
+            self._strikes.pop(slug, None)
+            signal_prob = self._signal_probs.pop(slug, 0.5)
+
+            if self._outcome_store is not None and self.calibrator is not None:
+                rec = OutcomeRecord(
+                    slug=slug,
+                    side=pos.side,
+                    signal_prob=signal_prob,
+                    entry_price=pos.entry_price,
+                    entry_ts=pos.entry_ts,
+                    exit_ts=now,
+                    outcome=winning_side,
+                    pnl=trade.pnl,
+                    exit_reason=trade.exit_reason,
+                )
+                self._outcome_store.append(rec)
+                self.calibrator.observe(signal_prob, trade.pnl > 0)
+
+            # Shadow ledger: settle hypothetical records for this window.
+            if self.shadow:
+                settled = self.shadow.settle(slug, winning_side, spot_px, now)
+                for s in settled:
+                    self.shadow.append_settled(s)
 
     def tick(self) -> None:
         now = time.time()
         spot_px = self.spot.price()
         self._settle_expired(now)
+        self._settle_shadow_expired(now)
 
         # Hand the strategy a measured volatility if it wants one. The window
         # configured on the strategy drives both the measurement here and the
@@ -192,6 +301,18 @@ class Runner:
             if self.writer:
                 self.writer.write(snap)
 
+            # Shadow ledger: record hypothetical trades at every rung x direction.
+            if self.shadow:
+                records = self.shadow.evaluate(snap)
+                for rec in records:
+                    self.shadow.append(rec)
+
+            # Track ALL window end times and strikes, not just traded ones,
+            # so shadow records settle correctly even on windows we skip.
+            self._window_end.setdefault(market.slug, market.end_ts)
+            if market.strike is not None:
+                self._strikes.setdefault(market.slug, market.strike)
+
             if not (self.trade and self.strategy and self.executor):
                 continue
 
@@ -205,6 +326,16 @@ class Runner:
             signal = self.strategy.decide(snap)
             if signal is None:
                 continue
+
+            # Calibrate the signal's probability from historical outcomes.
+            if self.calibrator is not None:
+                cal_prob, n_cal = self.calibrator.calibrate(signal.prob)
+                if n_cal > 0 and cal_prob != signal.prob:
+                    signal = Signal(
+                        side=signal.side,
+                        prob=cal_prob,
+                        reason=f"{signal.reason} | calibrated({n_cal})",
+                    )
 
             halted = self.guard.check(self.portfolio)
             if halted:
@@ -231,6 +362,8 @@ class Runner:
             self.risk.on_trade(now)
             self._traded_windows.add(market.slug)
             self._window_end[market.slug] = market.end_ts
+            self._strikes[market.slug] = market.strike
+            self._signal_probs[market.slug] = signal.prob
             log.info(
                 "%s: bought %s %.2f @ %.3f | %s | equity $%.2f",
                 market.slug,

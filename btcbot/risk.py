@@ -141,7 +141,10 @@ class RiskManager:
                 f"no edge after fees (gross {gross_edge:+.4f}, net {net_edge:+.4f})"
             )
 
-        f = kelly_fraction(signal.prob, entry) * self.cfg.kelly_fraction
+        # Size on the NET edge. Kelly on the gross edge over-bets by exactly the
+        # fee drag, which is the difference between a small positive edge and a
+        # negative one on a near-coin-flip.
+        f = kelly_fraction(signal.prob - fee_per_share, entry) * self.cfg.kelly_fraction
         if f <= 0:
             return None, "non-positive kelly"
 

@@ -156,9 +156,33 @@ class ExecutionConfig:
 
 
 @dataclass
+class LearningConfig:
+    """Online calibration from observed trade outcomes.
+
+    Disabled by default. Enable only after you have accumulated hundreds of
+    settled trades — with fewer data points the posterior barely budges from
+    the prior, so there is nothing to gain and configuration overhead to pay.
+    """
+
+    enabled: bool = False
+    alpha_prior: float = 1.0
+    beta_prior: float = 1.0
+    outcome_file: str = "outcomes.jsonl"
+
+
+@dataclass
 class StrategyConfig:
     name: str = "volume_threshold"
     params: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class ShadowConfig:
+    enabled: bool = True
+    rungs: list[int] = field(default_factory=lambda: [120, 240, 420, 900])
+    directions: list[str] = field(default_factory=lambda: ["follow", "fade"])
+    notional_usd: float = 1.0
+    ledger_file: str = "shadow.jsonl"
 
 
 @dataclass
@@ -170,6 +194,8 @@ class Config:
     markets: MarketsConfig = field(default_factory=MarketsConfig)
     execution: ExecutionConfig = field(default_factory=ExecutionConfig)
     exits: ExitsConfig = field(default_factory=ExitsConfig)
+    learning: LearningConfig = field(default_factory=LearningConfig)
+    shadow: ShadowConfig = field(default_factory=ShadowConfig)
     strategy: StrategyConfig = field(default_factory=StrategyConfig)
     kalshi_url: str = "https://api.elections.kalshi.com/trade-api/v2"
     gamma_url: str = "https://gamma-api.polymarket.com"
@@ -211,6 +237,8 @@ def load_config(path: str | Path | None = None) -> Config:
         ("fees", cfg.fees),
         ("markets", cfg.markets),
         ("exits", cfg.exits),
+        ("learning", cfg.learning),
+        ("shadow", cfg.shadow),
     ):
         if section in raw:
             _merge(target, raw.pop(section))

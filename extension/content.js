@@ -14,8 +14,12 @@
     </div>
     <div class="bb-body" id="bb-body">
       <div class="bb-msg" id="bb-msg">connecting…</div>
-      <div id="bb-portfolio" style="display:none"></div>
-      <div id="bb-controls" style="display:none"></div>
+      <div id="bb-tabs" style="display:none">
+        <button class="bb-tab bb-tab-active" data-tab="paper">Paper</button>
+        <button class="bb-tab" data-tab="live">Live</button>
+      </div>
+      <div id="bb-paper-panel"></div>
+      <div id="bb-live-panel" style="display:none"></div>
       <div id="bb-markets"></div>
       <div class="bb-foot">read-only · places no orders</div>
     </div>`;
@@ -27,6 +31,17 @@
   });
   head.addEventListener("dblclick", () => {
     panel.classList.toggle("bb-collapsed");
+  });
+
+  // Tab switching
+  document.getElementById("bb-tabs").addEventListener("click", (e) => {
+    const tab = e.target.closest(".bb-tab");
+    if (!tab) return;
+    document.querySelectorAll(".bb-tab").forEach((t) => t.classList.remove("bb-tab-active"));
+    tab.classList.add("bb-tab-active");
+    const tt = tab.dataset.tab;
+    document.getElementById("bb-paper-panel").style.display = tt === "paper" ? "" : "none";
+    document.getElementById("bb-live-panel").style.display = tt === "live" ? "" : "none";
   });
 
   const pct = (v) => (v == null ? "—" : (v * 100).toFixed(1) + "%");
@@ -60,39 +75,59 @@
     });
   }
 
-  function renderPortfolio(p) {
-    const el = document.getElementById("bb-portfolio");
+  function renderPortfolio(p, mode) {
+    const paperPanel = document.getElementById("bb-paper-panel");
+    const livePanel = document.getElementById("bb-live-panel");
+    document.getElementById("bb-tabs").style.display = "flex";
+
     if (!p || !p.active) {
-      el.style.display = "none";
+      paperPanel.innerHTML = `<div class="bb-section-label">Paper Trading</div><div class="bb-dim" style="padding:6px 0">not started</div><div id="bb-shadow-section"></div>`;
+      livePanel.innerHTML = `<div class="bb-section-label">Live Trading</div><div class="bb-dim" style="padding:6px 0">disabled (mode: ${mode})</div>`;
       return;
     }
-    el.style.display = "block";
+
     const pnlCls = p.pnl > 0 ? "bb-up" : p.pnl < 0 ? "bb-down" : "";
     const posDetail = (p.positions || []).length
       ? p.positions.map((x) => `${x.side} ${x.shares.toFixed(1)}`).join(" · ")
       : "none open";
-    el.innerHTML = `
-      <div class="bb-portfolio-row">
-        <span class="${pnlCls}">P&L ${usd(p.pnl)}</span>
-        <span class="bb-dim">eq ${usd(p.equity)}</span>
-        <span class="bb-dim">${p.n_positions} pos</span>
+
+    paperPanel.innerHTML = `
+      <div class="bb-section-label">Paper Trading</div>
+      <div class="bb-panel-grid">
+        <div>
+          <div class="bb-portfolio-row">
+            <span class="${pnlCls}" style="font-size:15px;font-weight:650">P&L ${usd(p.pnl)}</span>
+            <span class="bb-dim">eq ${usd(p.equity)}</span>
+          </div>
+          <div class="bb-pos-detail">${posDetail}</div>
+        </div>
+        <div class="bb-panel-stats">
+          <span class="bb-dim">closed: ${p.closed_trades} (${p.wins}W / ${p.losses}L)</span>
+          <span class="bb-dim">realized: ${usd(p.realized_pnl)}</span>
+        </div>
       </div>
-      <div class="bb-pos-detail">${posDetail}</div>`;
+      <div class="bb-status-line">
+        <span class="bb-status-dot ${p.active ? "bb-live" : "bb-idle"}"></span>
+        <span class="bb-dim">${p.active ? "running" : "idle"}</span>
+        <span class="bb-grow"></span>
+      </div>
+      <div id="bb-shadow-section"></div>`;
+
+    livePanel.innerHTML = `
+      <div class="bb-section-label">Live Trading</div>
+      <div class="bb-dim" style="padding:6px 0">not available (paper mode)</div>`;
   }
 
   function renderControls(s) {
-    const el = document.getElementById("bb-controls");
+    const paperPanel = document.getElementById("bb-paper-panel");
     const running = s && s.running;
-    el.style.display = "block";
-    el.innerHTML = `
-      <div class="bb-status-line">
-        <span class="bb-status-dot ${running ? "bb-live" : "bb-idle"}"></span>
-        <span class="bb-dim">${running ? "paper · " + s.ticks + " ticks" : "paper idle"}</span>
-        <span class="bb-grow"></span>
-        ${running
-          ? `<button class="bb-btn bb-btn-stop" id="bb-stop">stop</button>`
-          : `<button class="bb-btn bb-btn-start" id="bb-start">start</button>`}
-      </div>`;
+    const existingBtn = paperPanel.querySelector(".bb-btn");
+    if (existingBtn) return; // already rendered
+    paperPanel.insertAdjacentHTML("beforeend",
+      running
+        ? `<button class="bb-btn bb-btn-stop" id="bb-stop">stop paper</button>`
+        : `<button class="bb-btn bb-btn-start" id="bb-start">start paper</button>`
+    );
     const startBtn = document.getElementById("bb-start");
     const stopBtn = document.getElementById("bb-stop");
     if (startBtn) {
@@ -108,6 +143,91 @@
       });
     }
   }
+
+  // -- shadow ledger ---------------------------------------------------
+
+  let shadowStatus = null;
+  let shadowReport = null;
+  let shadowReplayBusy = false;
+
+  const RUNG_TABLE = { 0: "≤2m", 1: "≤4m", 2: "≤7m", 3: "≤15m" };
+
+  function renderShadowTab(status, rows) {
+    const box = document.getElementById("bb-shadow-section");
+    if (!box) return;
+
+    // Summary bar
+    let html = '<div class="bb-section-label">Shadow Ledger</div>';
+    if (status && status.exists) {
+      html += `<div class="bb-shadow-summary">
+        <span>${status.records} records</span>
+        <span>${status.settled} settled</span>
+        <span>${status.windows} windows</span>
+        <span class="bb-dim">${status.unsettled_slugs} unsettled</span>
+      </div>`;
+    } else {
+      html += '<div class="bb-dim" style="padding:4px 0">no shadow data</div>';
+    }
+
+    // Replay button
+    const replayDisabled = shadowReplayBusy ? " disabled" : "";
+    html += `<div class="bb-shadow-actions">
+      <button class="bb-btn${replayDisabled}" id="bb-shadow-replay">${shadowReplayBusy ? "replaying…" : "replay from snapshots"}</button>
+    </div>`;
+
+    // Replay result
+    const resultEl = document.getElementById("bb-shadow-result");
+    if (resultEl) html += resultEl.outerHTML;
+
+    // Report table
+    if (rows && rows.length) {
+      html += `<div class="bb-shadow-table-wrap"><table class="bb-shadow-table">
+        <tr><th>Rung</th><th>Dir</th><th>W</th><th>R</th><th>Win%</th><th>Mean$</th><th>LCB₉₅</th><th>vsR0</th></tr>`;
+      for (const r of rows) {
+        const wrCls = r.win_rate > 0.5 ? "bb-up" : "bb-down";
+        const pnlCls = r.mean_net_pnl > 0 ? "bb-up" : r.mean_net_pnl < 0 ? "bb-down" : "";
+        const lcbCls = r.lcb95 > 0 ? "bb-up" : r.lcb95 < 0 ? "bb-down" : "";
+        const pairCls = r.paired_diff_r0 > 0 ? "bb-up" : r.paired_diff_r0 < 0 ? "bb-down" : "";
+        html += `<tr>
+          <td class="bb-dim">${RUNG_TABLE[r.rung] || r.rung}</td>
+          <td>${r.direction === "up" ? "▲" : "▼"}</td>
+          <td class="bb-dim">${r.windows}</td>
+          <td class="bb-dim">${r.records}</td>
+          <td class="${wrCls}">${(r.win_rate * 100).toFixed(1)}</td>
+          <td class="${pnlCls}">${r.mean_net_pnl.toFixed(4)}</td>
+          <td class="${lcbCls}">${r.lcb95.toFixed(4)}</td>
+          <td class="${pairCls}">${r.paired_diff_r0 != null ? r.paired_diff_r0.toFixed(4) : "—"}</td>
+        </tr>`;
+      }
+      html += `</table></div>`;
+    } else if (status && status.exists) {
+      html += '<div class="bb-dim" style="padding:4px 0">no settled records yet</div>';
+    }
+
+    box.innerHTML = html;
+  }
+
+  // Single delegated click handler for shadow panel (avoids listener leaks during poll)
+  document.addEventListener("click", (e) => {
+    const btn = e.target.closest("#bb-shadow-replay");
+    if (!btn || btn.disabled) return;
+    shadowReplayBusy = true;
+    renderShadowTab(shadowStatus, shadowReport);
+    sendBg({ type: "RUN_SHADOW_REPLAY" }).then((res) => {
+      shadowReplayBusy = false;
+      const replayRes = res && res.state;
+      const resultHtml = replayRes && replayRes.ok
+        ? `<div class="bb-shadow-result" id="bb-shadow-result"><span class="bb-up">✓</span> ${replayRes.records} records (${replayRes.windows} windows)</div>`
+        : `<div class="bb-shadow-result bb-shadow-result-err" id="bb-shadow-result">✗ ${(replayRes && replayRes.error) || (res && res.error) || "failed"}</div>`;
+      const existing = document.getElementById("bb-shadow-result");
+      if (existing) existing.outerHTML = resultHtml;
+      else {
+        const r = document.getElementById("bb-shadow-replay");
+        if (r) r.insertAdjacentHTML("afterend", resultHtml);
+      }
+      maybeFetchShadowReport();
+    });
+  });
 
   function renderMarkets(rows, volAnnual) {
     const box = document.getElementById("bb-markets");
@@ -158,8 +278,9 @@
     document.getElementById("bb-msg").textContent = msg;
     document.getElementById("bb-msg").style.display = "block";
     document.getElementById("bb-markets").innerHTML = "";
-    document.getElementById("bb-portfolio").style.display = "none";
-    document.getElementById("bb-controls").style.display = "none";
+    document.getElementById("bb-tabs").style.display = "none";
+    document.getElementById("bb-paper-panel").innerHTML = "";
+    document.getElementById("bb-live-panel").innerHTML = "";
   }
 
   function render(res) {
@@ -179,14 +300,29 @@
     }
 
     const volAnnual = s.markets && s.markets[0] ? s.markets[0].vol_annual : null;
-    renderPortfolio(s.portfolio);
+    renderPortfolio(s.portfolio, s.mode);
     renderControls(s);
     renderMarkets(s.markets, volAnnual);
+  }
+
+  function fetchShadowStatus() {
+    sendBg({ type: "GET_SHADOW_STATUS" }).then((res) => {
+      if (res && res.ok && res.state) shadowStatus = res.state;
+      renderShadowTab(shadowStatus, shadowReport);
+    });
+  }
+
+  function maybeFetchShadowReport() {
+    sendBg({ type: "GET_SHADOW_REPORT" }).then((res) => {
+      if (res && res.ok && res.state && res.state.rows) shadowReport = res.state.rows;
+      renderShadowTab(shadowStatus, shadowReport);
+    });
   }
 
   function poll() {
     sendBg({ type: "GET_STATE" }).then((res) => {
       render(res);
+      fetchShadowStatus();
       setTimeout(poll, 2000);
     });
   }

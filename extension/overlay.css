@@ -121,3 +121,47 @@
   margin-top: 6px; padding-top: 6px; border-top: 1px solid #23272f;
   color: #6e7681; font-size: 10px; text-align: center;
 }
+
+#btcbot-overlay .bb-section-label {
+  font-size: 10px; text-transform: uppercase; letter-spacing: .05em;
+  color: #6e7681; margin: 6px 0 4px;
+}
+#btcbot-overlay .bb-panel-grid { display: flex; gap: 8px; align-items: flex-start; justify-content: space-between; }
+#btcbot-overlay .bb-panel-stats { text-align: right; font-size: 11px; line-height: 1.6; }
+#btcbot-overlay .bb-tabs {
+  display: flex; gap: 0; border-bottom: 1px solid #23272f;
+  margin: 0 -10px 6px; padding: 0 10px;
+}
+#btcbot-overlay .bb-tab {
+  font: inherit; font-size: 11px; font-weight: 600; padding: 5px 12px; border: none;
+  background: transparent; color: #6e7681; cursor: pointer;
+  border-bottom: 2px solid transparent; margin-bottom: -1px;
+}
+#btcbot-overlay .bb-tab:hover { color: #e6e9ef; }
+#btcbot-overlay .bb-tab-active { color: #58a6ff; border-bottom-color: #58a6ff; }
+
+/* shadow ledger */
+#btcbot-overlay .bb-shadow-summary {
+  display: flex; gap: 8px; font-size: 11px; padding: 4px 0 6px; flex-wrap: wrap;
+}
+#btcbot-overlay .bb-shadow-actions { padding: 2px 0 6px; }
+#btcbot-overlay .bb-shadow-table-wrap { overflow-x: auto; margin: 0 -10px; padding: 0 10px; }
+#btcbot-overlay .bb-shadow-table {
+  width: 100%; border-collapse: collapse; font-size: 10px; font-variant-numeric: tabular-nums;
+}
+#btcbot-overlay .bb-shadow-table th {
+  text-align: right; font-weight: 600; color: #6e7681; padding: 2px 4px; border-bottom: 1px solid #23272f;
+  font-size: 9px; text-transform: uppercase; letter-spacing: .03em;
+}
+#btcbot-overlay .bb-shadow-table td {
+  text-align: right; padding: 2px 4px; border-bottom: 1px solid #23272f;
+}
+#btcbot-overlay .bb-shadow-table td:first-child { text-align: left; }
+#btcbot-overlay .bb-shadow-table td:nth-child(2) { text-align: center; }
+#btcbot-overlay .bb-shadow-result {
+  margin: 4px 0; padding: 4px 7px; border-radius: 5px;
+  background: rgba(63, 185, 80, .12); color: #3fb950; font-size: 10px;
+}
+#btcbot-overlay .bb-shadow-result-err {
+  background: rgba(248, 81, 73, .12); color: #f85149;
+}
