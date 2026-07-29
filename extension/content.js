@@ -39,8 +39,9 @@
     if (!tab) return;
     document.querySelectorAll(".bb-tab").forEach((t) => t.classList.remove("bb-tab-active"));
     tab.classList.add("bb-tab-active");
-    document.getElementById("bb-paper-panel").style.display = tab.dataset.tab === "paper" ? "" : "none";
-    document.getElementById("bb-live-panel").style.display = tab.dataset.tab === "live" ? "" : "none";
+    const tt = tab.dataset.tab;
+    document.getElementById("bb-paper-panel").style.display = tt === "paper" ? "" : "none";
+    document.getElementById("bb-live-panel").style.display = tt === "live" ? "" : "none";
   });
 
   const pct = (v) => (v == null ? "—" : (v * 100).toFixed(1) + "%");
@@ -77,14 +78,13 @@
   function renderPortfolio(p, mode) {
     const paperPanel = document.getElementById("bb-paper-panel");
     const livePanel = document.getElementById("bb-live-panel");
+    document.getElementById("bb-tabs").style.display = "flex";
 
     if (!p || !p.active) {
-      paperPanel.innerHTML = `<div class="bb-section-label">Paper Trading</div><div class="bb-dim" style="padding:6px 0">not started</div>`;
+      paperPanel.innerHTML = `<div class="bb-section-label">Paper Trading</div><div class="bb-dim" style="padding:6px 0">not started</div><div id="bb-shadow-section"></div>`;
       livePanel.innerHTML = `<div class="bb-section-label">Live Trading</div><div class="bb-dim" style="padding:6px 0">disabled (mode: ${mode})</div>`;
-      document.getElementById("bb-tabs").style.display = "none";
       return;
     }
-    document.getElementById("bb-tabs").style.display = "flex";
 
     const pnlCls = p.pnl > 0 ? "bb-up" : p.pnl < 0 ? "bb-down" : "";
     const posDetail = (p.positions || []).length
@@ -110,7 +110,8 @@
         <span class="bb-status-dot ${p.active ? "bb-live" : "bb-idle"}"></span>
         <span class="bb-dim">${p.active ? "running" : "idle"}</span>
         <span class="bb-grow"></span>
-      </div>`;
+      </div>
+      <div id="bb-shadow-section"></div>`;
 
     livePanel.innerHTML = `
       <div class="bb-section-label">Live Trading</div>
@@ -142,6 +143,91 @@
       });
     }
   }
+
+  // -- shadow ledger ---------------------------------------------------
+
+  let shadowStatus = null;
+  let shadowReport = null;
+  let shadowReplayBusy = false;
+
+  const RUNG_TABLE = { 0: "≤2m", 1: "≤4m", 2: "≤7m", 3: "≤15m" };
+
+  function renderShadowTab(status, rows) {
+    const box = document.getElementById("bb-shadow-section");
+    if (!box) return;
+
+    // Summary bar
+    let html = '<div class="bb-section-label">Shadow Ledger</div>';
+    if (status && status.exists) {
+      html += `<div class="bb-shadow-summary">
+        <span>${status.records} records</span>
+        <span>${status.settled} settled</span>
+        <span>${status.windows} windows</span>
+        <span class="bb-dim">${status.unsettled_slugs} unsettled</span>
+      </div>`;
+    } else {
+      html += '<div class="bb-dim" style="padding:4px 0">no shadow data</div>';
+    }
+
+    // Replay button
+    const replayDisabled = shadowReplayBusy ? " disabled" : "";
+    html += `<div class="bb-shadow-actions">
+      <button class="bb-btn${replayDisabled}" id="bb-shadow-replay">${shadowReplayBusy ? "replaying…" : "replay from snapshots"}</button>
+    </div>`;
+
+    // Replay result
+    const resultEl = document.getElementById("bb-shadow-result");
+    if (resultEl) html += resultEl.outerHTML;
+
+    // Report table
+    if (rows && rows.length) {
+      html += `<div class="bb-shadow-table-wrap"><table class="bb-shadow-table">
+        <tr><th>Rung</th><th>Dir</th><th>W</th><th>R</th><th>Win%</th><th>Mean$</th><th>LCB₉₅</th><th>vsR0</th></tr>`;
+      for (const r of rows) {
+        const wrCls = r.win_rate > 0.5 ? "bb-up" : "bb-down";
+        const pnlCls = r.mean_net_pnl > 0 ? "bb-up" : r.mean_net_pnl < 0 ? "bb-down" : "";
+        const lcbCls = r.lcb95 > 0 ? "bb-up" : r.lcb95 < 0 ? "bb-down" : "";
+        const pairCls = r.paired_diff_r0 > 0 ? "bb-up" : r.paired_diff_r0 < 0 ? "bb-down" : "";
+        html += `<tr>
+          <td class="bb-dim">${RUNG_TABLE[r.rung] || r.rung}</td>
+          <td>${r.direction === "up" ? "▲" : "▼"}</td>
+          <td class="bb-dim">${r.windows}</td>
+          <td class="bb-dim">${r.records}</td>
+          <td class="${wrCls}">${(r.win_rate * 100).toFixed(1)}</td>
+          <td class="${pnlCls}">${r.mean_net_pnl.toFixed(4)}</td>
+          <td class="${lcbCls}">${r.lcb95.toFixed(4)}</td>
+          <td class="${pairCls}">${r.paired_diff_r0 != null ? r.paired_diff_r0.toFixed(4) : "—"}</td>
+        </tr>`;
+      }
+      html += `</table></div>`;
+    } else if (status && status.exists) {
+      html += '<div class="bb-dim" style="padding:4px 0">no settled records yet</div>';
+    }
+
+    box.innerHTML = html;
+  }
+
+  // Single delegated click handler for shadow panel (avoids listener leaks during poll)
+  document.addEventListener("click", (e) => {
+    const btn = e.target.closest("#bb-shadow-replay");
+    if (!btn || btn.disabled) return;
+    shadowReplayBusy = true;
+    renderShadowTab(shadowStatus, shadowReport);
+    sendBg({ type: "RUN_SHADOW_REPLAY" }).then((res) => {
+      shadowReplayBusy = false;
+      const replayRes = res && res.state;
+      const resultHtml = replayRes && replayRes.ok
+        ? `<div class="bb-shadow-result" id="bb-shadow-result"><span class="bb-up">✓</span> ${replayRes.records} records (${replayRes.windows} windows)</div>`
+        : `<div class="bb-shadow-result bb-shadow-result-err" id="bb-shadow-result">✗ ${(replayRes && replayRes.error) || (res && res.error) || "failed"}</div>`;
+      const existing = document.getElementById("bb-shadow-result");
+      if (existing) existing.outerHTML = resultHtml;
+      else {
+        const r = document.getElementById("bb-shadow-replay");
+        if (r) r.insertAdjacentHTML("afterend", resultHtml);
+      }
+      maybeFetchShadowReport();
+    });
+  });
 
   function renderMarkets(rows, volAnnual) {
     const box = document.getElementById("bb-markets");
@@ -219,9 +305,24 @@
     renderMarkets(s.markets, volAnnual);
   }
 
+  function fetchShadowStatus() {
+    sendBg({ type: "GET_SHADOW_STATUS" }).then((res) => {
+      if (res && res.ok && res.state) shadowStatus = res.state;
+      renderShadowTab(shadowStatus, shadowReport);
+    });
+  }
+
+  function maybeFetchShadowReport() {
+    sendBg({ type: "GET_SHADOW_REPORT" }).then((res) => {
+      if (res && res.ok && res.state && res.state.rows) shadowReport = res.state.rows;
+      renderShadowTab(shadowStatus, shadowReport);
+    });
+  }
+
   function poll() {
     sendBg({ type: "GET_STATE" }).then((res) => {
       render(res);
+      fetchShadowStatus();
       setTimeout(poll, 2000);
     });
   }

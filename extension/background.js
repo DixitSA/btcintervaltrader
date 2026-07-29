@@ -33,6 +33,15 @@
     if (msg && msg.type === "STOP_PAPER") {
       return nativeRequest("/api/paper/stop", "POST");
     }
+    if (msg && msg.type === "GET_SHADOW_STATUS") {
+      return nativeRequest("/api/shadow/status");
+    }
+    if (msg && msg.type === "GET_SHADOW_REPORT") {
+      return nativeRequest("/api/shadow/report");
+    }
+    if (msg && msg.type === "RUN_SHADOW_REPLAY") {
+      return nativeRequest("/api/shadow/replay", "POST");
+    }
     return undefined;
   });
 })();

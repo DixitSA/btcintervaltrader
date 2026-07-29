@@ -139,3 +139,29 @@
 }
 #btcbot-overlay .bb-tab:hover { color: #e6e9ef; }
 #btcbot-overlay .bb-tab-active { color: #58a6ff; border-bottom-color: #58a6ff; }
+
+/* shadow ledger */
+#btcbot-overlay .bb-shadow-summary {
+  display: flex; gap: 8px; font-size: 11px; padding: 4px 0 6px; flex-wrap: wrap;
+}
+#btcbot-overlay .bb-shadow-actions { padding: 2px 0 6px; }
+#btcbot-overlay .bb-shadow-table-wrap { overflow-x: auto; margin: 0 -10px; padding: 0 10px; }
+#btcbot-overlay .bb-shadow-table {
+  width: 100%; border-collapse: collapse; font-size: 10px; font-variant-numeric: tabular-nums;
+}
+#btcbot-overlay .bb-shadow-table th {
+  text-align: right; font-weight: 600; color: #6e7681; padding: 2px 4px; border-bottom: 1px solid #23272f;
+  font-size: 9px; text-transform: uppercase; letter-spacing: .03em;
+}
+#btcbot-overlay .bb-shadow-table td {
+  text-align: right; padding: 2px 4px; border-bottom: 1px solid #23272f;
+}
+#btcbot-overlay .bb-shadow-table td:first-child { text-align: left; }
+#btcbot-overlay .bb-shadow-table td:nth-child(2) { text-align: center; }
+#btcbot-overlay .bb-shadow-result {
+  margin: 4px 0; padding: 4px 7px; border-radius: 5px;
+  background: rgba(63, 185, 80, .12); color: #3fb950; font-size: 10px;
+}
+#btcbot-overlay .bb-shadow-result-err {
+  background: rgba(248, 81, 73, .12); color: #f85149;
+}

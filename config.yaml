@@ -125,6 +125,13 @@ execution:
     # Logs the command instead of running it. Leave true until verified.
     dry_run: true
 
+shadow:
+  enabled: true
+  rungs: [120, 240, 420, 900]
+  directions: [follow, fade]
+  notional_usd: 1.0
+  ledger_file: shadow.jsonl
+
 learning:
   # Online calibration from observed trade outcomes.
   # Disabled by default. Enable after accumulating at least ~100 settled trades —

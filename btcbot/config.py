@@ -177,6 +177,15 @@ class StrategyConfig:
 
 
 @dataclass
+class ShadowConfig:
+    enabled: bool = True
+    rungs: list[int] = field(default_factory=lambda: [120, 240, 420, 900])
+    directions: list[str] = field(default_factory=lambda: ["follow", "fade"])
+    notional_usd: float = 1.0
+    ledger_file: str = "shadow.jsonl"
+
+
+@dataclass
 class Config:
     mode: str = "paper"  # paper | live
     venue: str = "kalshi"  # kalshi | polymarket
@@ -186,6 +195,7 @@ class Config:
     execution: ExecutionConfig = field(default_factory=ExecutionConfig)
     exits: ExitsConfig = field(default_factory=ExitsConfig)
     learning: LearningConfig = field(default_factory=LearningConfig)
+    shadow: ShadowConfig = field(default_factory=ShadowConfig)
     strategy: StrategyConfig = field(default_factory=StrategyConfig)
     kalshi_url: str = "https://api.elections.kalshi.com/trade-api/v2"
     gamma_url: str = "https://gamma-api.polymarket.com"
@@ -228,6 +238,7 @@ def load_config(path: str | Path | None = None) -> Config:
         ("markets", cfg.markets),
         ("exits", cfg.exits),
         ("learning", cfg.learning),
+        ("shadow", cfg.shadow),
     ):
         if section in raw:
             _merge(target, raw.pop(section))

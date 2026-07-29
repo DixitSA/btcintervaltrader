@@ -535,6 +535,258 @@ def cmd_live(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_shadow_replay(args: argparse.Namespace) -> int:
+    """Regenerate shadow ledger from recorded snapshots."""
+    cfg = load_config(args.config)
+    data_dir = args.data_dir or cfg.data_dir
+    snapshots = load_dataset(data_dir)
+    if not snapshots:
+        print(f"No recorded snapshots in '{data_dir}'. Run `record` first.", file=sys.stderr)
+        return 1
+
+    from .backtest import group_windows, infer_outcome
+    from .fees import build_fee_model
+    from .shadow import ShadowLedger
+
+    windows = group_windows(snapshots)
+    fee_model = build_fee_model(cfg.venue, cfg.fees)
+    rung_defs = [
+        (i, cfg.markets.min_seconds_remaining, float(max_r))
+        for i, max_r in enumerate(cfg.shadow.rungs)
+    ]
+    output = Path(args.output or Path(data_dir) / cfg.shadow.ledger_file)
+
+    ledger = ShadowLedger(
+        ledger_path=output,
+        producer="replay",
+        fee_model=fee_model,
+        rung_defs=rung_defs,
+        enabled=True,
+    )
+
+    # Replay in time order, same as run_backtest.
+    ordered = sorted(
+        (s for w in windows.values() for s in w), key=lambda s: (s.ts, s.market.slug)
+    )
+    for snap in ordered:
+        records = ledger.evaluate(snap)
+        for rec in records:
+            ledger.append(rec)
+
+        slug = snap.market.slug
+        outcome = infer_outcome(windows[slug])
+        final_ts = windows[slug][-1].ts
+        if snap.ts >= final_ts:
+            settle_spot = snap.spot
+            settled = ledger.settle(slug, outcome, settle_spot, final_ts)
+            for s in settled:
+                ledger.append_settled(s)
+
+    # Anything still unsettled after replay
+    for slug in list(ledger.unsettled_slugs()):
+        if slug in windows:
+            outcome = infer_outcome(windows[slug])
+            final_ts = windows[slug][-1].ts
+            settle_spot = windows[slug][-1].spot
+            settled = ledger.settle(slug, outcome, settle_spot, final_ts)
+            for s in settled:
+                ledger.append_settled(s)
+
+    records = ledger.load_records()
+    unsettled = sum(1 for r in records if r.won is None)
+    print(f"shadow replay: {len(records)} records ({unsettled} unsettled) -> {output}")
+    print(f"  {len(windows)} windows, {len(snapshots)} snapshots")
+    return 0
+
+
+def cmd_shadow_report(args: argparse.Namespace) -> int:
+    """Window-clustered performance by (rung x direction)."""
+    import math
+    from collections import defaultdict
+
+    cfg = load_config(args.config)
+    ledger_path = Path(args.ledger or args.data_dir or cfg.data_dir) / cfg.shadow.ledger_file
+    if args.data_dir:
+        ledger_path = Path(args.data_dir) / cfg.shadow.ledger_file
+    if args.ledger:
+        ledger_path = Path(args.ledger)
+
+    if not ledger_path.exists():
+        print(f"No shadow ledger found at {ledger_path}.", file=sys.stderr)
+        print("Run `shadow-replay` or record with `shadow.enabled: true`.", file=sys.stderr)
+        return 1
+
+    from .shadow import DIRECTIONS, ShadowLedger, assert_no_history_in_ranking
+
+    ledger = ShadowLedger(ledger_path=ledger_path, enabled=True)
+    records = ledger.load_records()
+    if not records:
+        print("Shadow ledger is empty.", file=sys.stderr)
+        return 0
+
+    settled = [r for r in records if r.won is not None]
+    if not settled:
+        print("No settled records yet. Wait for windows to expire.", file=sys.stderr)
+        return 0
+
+    # Enforce the history firewall
+    assert_no_history_in_ranking(settled)
+
+    # Group by (rung, direction)
+    groups: dict[tuple[int, str], list] = defaultdict(list)
+    windows_per_rung: dict[tuple[int, str], set[str]] = defaultdict(set)
+    for r in settled:
+        key = (r.rung, r.direction)
+        groups[key].append(r)
+        windows_per_rung[key].add(r.slug)
+
+    n_windows_total = len(set(r.slug for r in settled))
+    print(f"\nshadow report — {len(settled)} settled records across {n_windows_total} windows")
+    print(f"{'rung':>4} {'dir':<8} {'windows':>8} {'records':>8} {'win%':>7} {'mean P&L':>9} {'LCB95':>8} {'diff r0':>8}")
+    print("-" * 68)
+
+    # Baseline for paired diff: rung 0 net_pnl per window
+    r0_by_window: dict[str, float] = {}
+    for k, recs in groups.items():
+        rung, direction = k
+        if rung == 0:
+            for r in recs:
+                r0_by_window[r.slug] = r.net_pnl
+
+    for rung in sorted({k[0] for k in groups}):
+        for direction in sorted(DIRECTIONS):
+            key = (rung, direction)
+            recs = groups.get(key, [])
+            if not recs:
+                continue
+
+            n_windows = len(windows_per_rung[key])
+            n_records = len(recs)
+            wins = sum(1 for r in recs if r.won is True)
+            win_rate = wins / n_records if n_records else 0.0
+            mean_pnl = sum(r.net_pnl for r in recs) / n_records if n_records else 0.0
+
+            # Window-clustered standard error
+            pnl_by_window: dict[str, float] = defaultdict(float)
+            counts_by_window: dict[str, int] = defaultdict(int)
+            for r in recs:
+                pnl_by_window[r.slug] += r.net_pnl
+                counts_by_window[r.slug] += 1
+            window_means = [pnl_by_window[s] / counts_by_window[s] for s in pnl_by_window]
+            if len(window_means) >= 2:
+                wm_mean = sum(window_means) / len(window_means)
+                wm_var = sum((m - wm_mean) ** 2 for m in window_means) / (len(window_means) - 1)
+                stderr = math.sqrt(wm_var / len(window_means))
+                lcb = wm_mean - 1.645 * stderr
+            else:
+                lcb = mean_pnl
+                stderr = None
+
+            # Paired diff vs rung 0 (same direction only)
+            paired_diffs = []
+            if rung > 0:
+                for r in recs:
+                    r0_pnl = r0_by_window.get(r.slug)
+                    if r0_pnl is not None:
+                        paired_diffs.append(r.net_pnl - r0_pnl)
+            paired_str = ""
+            if paired_diffs:
+                pd_mean = sum(paired_diffs) / len(paired_diffs)
+                paired_str = f"{pd_mean:+.4f}"
+
+            print(
+                f"{rung:>4} {direction:<8} {n_windows:>8} {n_records:>8} "
+                f"{win_rate:>6.1%} {mean_pnl:>+8.4f} {lcb:>+8.4f} {paired_str:>8}"
+            )
+
+    print("\nSample sizes are in WINDOWS, not records. Do not pool within-window")
+    print("observations as independent — they share one BTC path.")
+    return 0
+
+
+def cmd_verify_historical(args: argparse.Namespace) -> int:
+    """Probe Kalshi API for settled market / candlestick availability.
+
+    Three questions only:
+    1. How far back does KXBTC15M history go?
+    2. What is the finest granularity?
+    3. Does it carry the settlement result?
+
+    If the finest interval is hourly, the historical path is useless here.
+    """
+    cfg = load_config(args.config)
+    from .venues import build_venue
+
+    venue = build_venue(cfg)
+    if venue.name != "kalshi":
+        print("Historical probe is currently Kalshi-specific.", file=sys.stderr)
+        venue.close()
+        return 1
+
+    print("=== Kalshi Historical Data Probe ===\n")
+
+    # 1. Probe settled markets endpoint
+    print("1. Settled markets...")
+    try:
+        data = venue._request(
+            "GET",
+            "/markets",
+            params={
+                "series_ticker": "KXBTC15M",
+                "status": "settled",
+                "limit": 5,
+            },
+        )
+        markets = data.get("markets", []) or []
+        print(f"   Found {len(markets)} settled KXBTC15M markets")
+        if markets:
+            m = markets[0]
+            print(f"   Sample ticker: {m.get('ticker', '?')}")
+            print(f"   Has 'result' field: {'result' in m}")
+            result = m.get("result")
+            print(f"   Result value: {result}")
+            close_time = m.get("close_time", m.get("expiration_time", "?"))
+            print(f"   Close time: {close_time}")
+            # Check cursor for pagination
+            cursor = data.get("cursor", {})
+            print(f"   Cursor pagination: {'yes' if cursor else 'no'}")
+            if cursor:
+                print(f"   Next cursor: {cursor.get('next_cursor', 'none')}")
+    except Exception as exc:
+        print(f"   FAIL: {exc}")
+
+    # 2. Probe candlesticks endpoint
+    print("\n2. Candlesticks...")
+    for interval in [1, 5, 15, 60]:
+        try:
+            candles = venue._request(
+                "GET",
+                "/markets/candlesticks",
+                params={
+                    "series_ticker": "KXBTC15M",
+                    "period_interval": interval,
+                    "limit": 3,
+                },
+            )
+            bars = candles.get("candlesticks", []) if isinstance(candles, dict) else candles
+            if bars and len(bars) > 0:
+                bar = bars[0]
+                print(f"   interval={interval}m: {len(bars)} bars available")
+                print(f"     sample: open={bar.get('open')} high={bar.get('high')} "
+                      f"low={bar.get('low')} close={bar.get('close')} "
+                      f"ts={bar.get('end_period_ts', bar.get('start_period_ts', '?'))}")
+        except Exception as exc:
+            print(f"   interval={interval}m: FAIL: {exc}")
+
+    # 3. Summary
+    print("\n3. Verdict:")
+    print("   Run this from a machine with Kalshi API access to get results.")
+    print("   The granularity kill criterion is: finest interval >= 60m -> historical path dead.")
+
+    venue.close()
+    return 0
+
+
 def _coerce(value: str):
     for cast in (int, float):
         try:
@@ -625,6 +877,26 @@ def build_parser() -> argparse.ArgumentParser:
     p_pa.add_argument("--max-ticks", type=int, default=None)
     p_pa.add_argument("--report", action="store_true", help="print detailed trade log")
     p_pa.set_defaults(func=cmd_paper)
+
+    p_sr = sub.add_parser(
+        "shadow-replay", help="regenerate shadow ledger from recorded snapshots"
+    )
+    p_sr.add_argument("--data-dir", default=None)
+    p_sr.add_argument("--output", default=None, help="path to write shadow ledger (defaults to data-dir/shadow.jsonl)")
+    p_sr.set_defaults(func=cmd_shadow_replay)
+
+    p_srep = sub.add_parser(
+        "shadow-report", help="window-clustered performance by rung x direction"
+    )
+    p_srep.add_argument("--data-dir", default=None)
+    p_srep.add_argument("--ledger", default=None, help="path to shadow ledger file")
+    p_srep.set_defaults(func=cmd_shadow_report)
+
+    p_vh = sub.add_parser(
+        "verify-historical",
+        help="probe Kalshi API for settled market / candlestick availability",
+    )
+    p_vh.set_defaults(func=cmd_verify_historical)
 
     p_li = sub.add_parser("live", help="trade with REAL money (requires opt-in env var)")
     p_li.add_argument("--strategy", choices=sorted(REGISTRY), default=None)
