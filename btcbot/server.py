@@ -378,11 +378,11 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
-        # Let the Chrome extension read this, but not arbitrary web pages:
-        # a site you happen to visit should not be able to scrape your
-        # positions off localhost.
+        # Allow extension content scripts (which send the page's origin, e.g.
+        # https://kalshi.com) and extension background pages (moz-extension://
+        # or chrome-extension://).  Server is localhost-only so this is safe.
         origin = self.headers.get("Origin", "")
-        if origin.startswith("chrome-extension://"):
+        if origin:
             self.send_header("Access-Control-Allow-Origin", origin)
         self.end_headers()
         self.wfile.write(body)

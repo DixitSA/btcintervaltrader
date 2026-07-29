@@ -1,6 +1,3 @@
-/* Namespaced and self-contained so it cannot inherit or disturb Kalshi's
-   own styling. Fixed to the bottom-right, out of the order ticket's way. */
-
 #btcbot-overlay {
   position: fixed;
   right: 16px;
@@ -25,7 +22,10 @@
   padding: 8px 10px;
   background: #1d212a;
   border-bottom: 1px solid #2b303b;
+  cursor: grab;
+  user-select: none;
 }
+#btcbot-overlay .bb-head:active { cursor: grabbing; }
 #btcbot-overlay .bb-title { font-weight: 650; letter-spacing: .2px; }
 #btcbot-overlay .bb-grow { flex: 1; }
 #btcbot-overlay .bb-vol { color: #939bab; font-size: 11px; }
@@ -46,17 +46,60 @@
 
 #btcbot-overlay.bb-collapsed .bb-body { display: none; }
 
-#btcbot-overlay .bb-body { padding: 9px 10px 8px; }
-#btcbot-overlay .bb-msg { color: #939bab; padding: 5px 0; }
+#btcbot-overlay .bb-body { padding: 0 10px 8px; }
+#btcbot-overlay .bb-msg { color: #939bab; padding: 8px 0; }
 
+/* status line (paper running/idle + start/stop) */
+#btcbot-overlay .bb-status-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 0;
+  font-size: 11px;
+}
+#btcbot-overlay .bb-status-dot {
+  width: 6px; height: 6px; border-radius: 50%; flex: none;
+  background: #6e7681;
+}
+#btcbot-overlay .bb-status-dot.bb-live { background: #3fb950; }
+#btcbot-overlay .bb-status-dot.bb-idle { background: #d29922; }
+
+#btcbot-overlay .bb-btn {
+  font: inherit; font-size: 11px; padding: 2px 8px; border-radius: 5px;
+  border: 1px solid #2b303b; background: transparent; color: #e6e9ef;
+  cursor: pointer; line-height: 1.4;
+}
+#btcbot-overlay .bb-btn:hover { border-color: #58a6ff; color: #58a6ff; }
+#btcbot-overlay .bb-btn-start { border-color: #3fb950; color: #3fb950; }
+#btcbot-overlay .bb-btn-start:hover { background: rgba(63, 185, 80, .15); }
+#btcbot-overlay .bb-btn-stop { border-color: #f85149; color: #f85149; }
+#btcbot-overlay .bb-btn-stop:hover { background: rgba(248, 81, 73, .15); }
+
+/* portfolio row */
+#btcbot-overlay .bb-portfolio-row {
+  display: flex; gap: 10px; align-items: baseline;
+  padding: 5px 0 2px; font-size: 12px; font-weight: 600;
+  border-bottom: 1px solid #23272f;
+}
+#btcbot-overlay .bb-pos-detail {
+  font-size: 10px; color: #939bab; padding: 2px 0 4px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* markets */
 #btcbot-overlay .bb-mkt { padding: 6px 0; border-top: 1px solid #23272f; }
 #btcbot-overlay .bb-mkt:first-child { border-top: none; }
 
 #btcbot-overlay .bb-slug {
   display: flex; justify-content: space-between; gap: 8px;
-  font-size: 11px; color: #939bab; margin-bottom: 5px;
+  font-size: 11px; color: #939bab; margin-bottom: 3px;
 }
 #btcbot-overlay .bb-left { color: #58a6ff; font-variant-numeric: tabular-nums; }
+
+#btcbot-overlay .bb-spread {
+  font-size: 10px; color: #6e7681; margin-bottom: 3px;
+}
+#btcbot-overlay .bb-held { color: #58a6ff; font-weight: 650; }
 
 #btcbot-overlay .bb-grid {
   display: grid; grid-template-columns: auto 1fr; gap: 2px 10px;
@@ -70,11 +113,11 @@
 #btcbot-overlay .bb-dim { color: #6e7681; font-weight: 400; }
 
 #btcbot-overlay .bb-warn {
-  margin-top: 6px; padding: 5px 7px; border-radius: 5px;
-  background: rgba(248, 81, 73, .12); color: #f85149; font-size: 11px;
+  margin-top: 5px; padding: 4px 7px; border-radius: 5px;
+  background: rgba(248, 81, 73, .12); color: #f85149; font-size: 10px;
 }
 
 #btcbot-overlay .bb-foot {
-  margin-top: 8px; padding-top: 7px; border-top: 1px solid #23272f;
+  margin-top: 6px; padding-top: 6px; border-top: 1px solid #23272f;
   color: #6e7681; font-size: 10px; text-align: center;
 }
