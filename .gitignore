@@ -12,3 +12,7 @@ venv/
 # supervisor). Local to one machine's run; the data itself is under data/.
 recorder-supervisor.log
 recorder.pid
+
+# Local AI-tooling scratch dirs. Not part of the bot.
+.opencode/
+.impeccable/
