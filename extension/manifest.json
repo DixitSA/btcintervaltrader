@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "btcbot overlay",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Read-only overlay showing the local btcbot model's view of the KXBTC15M window you are looking at. Places no orders.",
   "browser_specific_settings": {
     "gecko": {

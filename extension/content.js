@@ -44,6 +44,19 @@
     document.getElementById("bb-live-panel").style.display = tt === "live" ? "" : "none";
   });
 
+  // Rewriting identical markup every 2s repaints the overlay, collapses any
+  // open <details>, and drops scroll position mid-read. Compare against the
+  // last string we wrote rather than against the DOM, so markup other code
+  // appends afterwards (the start/stop button) does not force a rewrite.
+  const _lastHtml = Object.create(null);
+  function setHTML(el, key, html) {
+    if (!el || _lastHtml[key] === html) return false;
+    _lastHtml[key] = html;
+    el.innerHTML = html;
+    return true;
+  }
+  const setText = (el, v) => { if (el && el.textContent !== v) el.textContent = v; };
+
   const pct = (v) => (v == null ? "—" : (v * 100).toFixed(1) + "%");
   const usd = (v) => (v == null ? "—" : (v < 0 ? "-$" : "$") + Math.abs(v).toFixed(2));
   const mmss = (s) => {
@@ -81,8 +94,8 @@
     document.getElementById("bb-tabs").style.display = "flex";
 
     if (!p || !p.active) {
-      paperPanel.innerHTML = `<div class="bb-section-label">Paper Trading</div><div class="bb-dim" style="padding:6px 0">not started</div><div id="bb-shadow-section"></div>`;
-      livePanel.innerHTML = `<div class="bb-section-label">Live Trading</div><div class="bb-dim" style="padding:6px 0">disabled (mode: ${mode})</div>`;
+      setHTML(paperPanel, "paper", `<div class="bb-section-label">Paper Trading</div><div class="bb-dim" style="padding:6px 0">not started</div><div id="bb-shadow-section"></div>`);
+      renderLivePanel(livePanel, p, mode);
       return;
     }
 
@@ -91,7 +104,7 @@
       ? p.positions.map((x) => `${x.side} ${x.shares.toFixed(1)}`).join(" · ")
       : "none open";
 
-    paperPanel.innerHTML = `
+    setHTML(paperPanel, "paper", `
       <div class="bb-section-label">Paper Trading</div>
       <div class="bb-panel-grid">
         <div>
@@ -111,7 +124,7 @@
         <span class="bb-dim">${p.active ? "running" : "idle"}</span>
         <span class="bb-grow"></span>
       </div>
-      <div id="bb-shadow-section"></div>`;
+      <div id="bb-shadow-section"></div>`);
 
     renderLivePanel(livePanel, p, mode);
   }
@@ -119,7 +132,7 @@
   function renderLivePanel(livePanel, p, mode) {
     const isLive = mode === "live";
     if (!isLive) {
-      livePanel.innerHTML = `
+      setHTML(livePanel, "live", `
         <div class="bb-section-label">Live Trading</div>
         <div class="bb-live-off">
           <div class="bb-live-off-title">Not trading real money</div>
@@ -131,11 +144,11 @@
         </div>
         <div class="bb-foot" style="padding-top:6px">
           This panel never places orders. It is a read-only view.
-        </div>`;
+        </div>`);
       return;
     }
     const pnlCls = p && p.pnl > 0 ? "bb-up" : p && p.pnl < 0 ? "bb-down" : "";
-    livePanel.innerHTML = `
+    setHTML(livePanel, "live", `
       <div class="bb-section-label">Live Trading</div>
       <div class="bb-live-on">REAL MONEY — mode: live</div>
       <div class="bb-panel-grid">
@@ -147,14 +160,19 @@
           <span class="bb-dim">closed: ${(p && p.closed_trades) ?? 0} (${(p && p.wins) ?? 0}W / ${(p && p.losses) ?? 0}L)</span>
           <span class="bb-dim">realized: ${usd(p && p.realized_pnl)}</span>
         </div>
-      </div>`;
+      </div>`);
   }
 
   function renderControls(s) {
     const paperPanel = document.getElementById("bb-paper-panel");
     const running = s && s.running;
     const existingBtn = paperPanel.querySelector(".bb-btn");
-    if (existingBtn) return; // already rendered
+    // Match the button to the CURRENT state. "Any button exists" was only ever
+    // safe because the panel was wiped every poll; now that it is cached, that
+    // test would freeze the button on whichever state it first rendered.
+    const wantId = running ? "bb-stop" : "bb-start";
+    if (existingBtn && existingBtn.id === wantId) return;
+    if (existingBtn) existingBtn.remove();
     paperPanel.insertAdjacentHTML("beforeend",
       running
         ? `<button class="bb-btn bb-btn-stop" id="bb-stop">stop paper</button>`
@@ -259,6 +277,10 @@
           : ""}
       </div>`;
 
+      // The overlay is ~380px wide; a 7-column table plus caveat swamps it.
+      // Keep the headline always visible, put the breakdown behind a
+      // disclosure. Cached rendering means the open state now survives polls.
+      html += `<details class="bb-details"><summary>per-rung breakdown (${rows.length} strategies)</summary>`;
       html += `<div class="bb-shadow-table-wrap"><table class="bb-shadow-table">
         <tr><th>Rung</th><th>Dir</th><th>W</th><th>Win%</th><th>@$${unitUsd}</th><th>LCB₉₅</th><th>vsR0</th></tr>`;
       for (const r of rows) {
@@ -282,12 +304,12 @@
         Each row is a <b>separate</b> strategy — you cannot run follow and fade,
         or several rungs, on the same window. Do not add these up.
         Sample size is <b>windows</b>, not records.
-      </div>`;
+      </div></details>`;
     } else if (status && status.exists) {
       html += '<div class="bb-dim" style="padding:4px 0">no settled records yet</div>';
     }
 
-    box.innerHTML = html;
+    setHTML(box, "shadow", html);
   }
 
   const UNIT_STEPS = [1, 2, 5, 10, 25, 50, 100];
@@ -329,15 +351,15 @@
 
   function renderMarkets(rows, volAnnual) {
     const box = document.getElementById("bb-markets");
-    document.getElementById("bb-vol").textContent =
-      volAnnual != null ? "vol " + pct(volAnnual) : "—";
+    setText(document.getElementById("bb-vol"),
+      volAnnual != null ? "vol " + pct(volAnnual) : "—");
 
     if (!rows || !rows.length) {
-      box.innerHTML = `<div class="bb-msg" style="display:block">no open windows in range</div>`;
+      setHTML(box, "markets", `<div class="bb-msg" style="display:block">no open windows in range</div>`);
       return;
     }
 
-    box.innerHTML = rows
+    setHTML(box, "markets", rows
       .map((m) => {
         let edge = '<span class="bb-dim">—</span>';
         if (m.edge != null) {
@@ -368,7 +390,7 @@
           ${impossible}
         </div>`;
       })
-      .join("");
+      .join(""));
   }
 
   function renderError(msg) {
