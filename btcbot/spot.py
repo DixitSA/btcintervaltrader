@@ -1,7 +1,8 @@
-"""BTC spot price feed.
+"""Spot price feeds.
 
+Manages per-asset feeds (BTC, ETH, SOL) from Binance.
 IMPORTANT: this feed is for *signals only*. It is almost certainly NOT the
-source Polymarket settles against. Before risking real money, confirm which
+source Kalshi settles against. Before risking real money, confirm which
 oracle and which exact timestamp resolves these windows -- a feed that differs
 by even a few dollars near expiry will flip the outcome of exactly the trades
 you thought were safest.
@@ -53,7 +54,7 @@ class SpotFeed:
             resp.raise_for_status()
             px = float(resp.json()["price"])
         except (httpx.HTTPError, KeyError, ValueError) as exc:
-            log.warning("spot price fetch failed: %s", exc)
+            log.warning("spot price fetch failed (%s): %s", self.symbol, exc)
             return None
         self._history.append((time.time(), px))
         return px
@@ -79,9 +80,57 @@ class SpotFeed:
         ]
 
     def realized_vol(self, lookback_seconds: float = 300.0) -> Optional[float]:
-        """Stdev of log returns over the lookback, scaled to that window.
-
-        Delegates to the shared implementation so the live path and the
-        backtester cannot drift apart.
-        """
         return realized_vol_from_series(self._history, lookback_seconds)
+
+
+class SpotFeedManager:
+    """Manages a SpotFeed per asset family, lazy-created on first use."""
+
+    def __init__(self, families: dict[str, Any], base_url: str) -> None:
+        self._families = families
+        self._base_url = base_url.rstrip("/")
+        self._feeds: dict[str, SpotFeed] = {}
+
+    def _feed(self, symbol: str) -> SpotFeed:
+        if symbol not in self._feeds:
+            self._feeds[symbol] = SpotFeed(base_url=self._base_url, symbol=symbol)
+        return self._feeds[symbol]
+
+    def price(self, family: str) -> Optional[float]:
+        fam = self._families.get(family)
+        if fam is None:
+            return None
+        return self._feed(fam.spot_symbol).price()
+
+    def realized_vol(self, family: str, window: float) -> Optional[float]:
+        fam = self._families.get(family)
+        if fam is None:
+            return None
+        return self._feed(fam.spot_symbol).realized_vol(window)
+
+    def klines(self, family: str, interval: str = "1m", limit: int = 1000) -> list[dict[str, float]]:
+        fam = self._families.get(family)
+        if fam is None:
+            return []
+        return self._feed(fam.spot_symbol).klines(interval, limit)
+
+    def all_prices(self) -> dict[str, Optional[float]]:
+        return {k: self.price(k) for k in self._families}
+
+    def close(self) -> None:
+        for feed in self._feeds.values():
+            feed.close()
+
+    # -- backward-compat helpers ----------------------------------------
+
+    @property
+    def first_feed(self) -> SpotFeed:
+        for fam in self._families.values():
+            return self._feed(fam.spot_symbol)
+        raise RuntimeError("no families configured")
+
+    @property
+    def first_price(self) -> Optional[float]:
+        for fam in self._families.values():
+            return self._feed(fam.spot_symbol).price()
+        return None

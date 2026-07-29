@@ -274,9 +274,29 @@
   font-size: 9.5px; line-height: 1.45; color: var(--bb-amber); margin-top: 4px;
 }
 #btcbot-overlay .bb-caveat {
-  font-size: 9px; line-height: 1.45; color: var(--bb-text-subtle); padding: 5px 0 2px;
+  color: var(--bb-text-dim); font-size: 10px; line-height: 1.5; margin-top: 8px;
 }
 #btcbot-overlay .bb-caveat b { color: var(--bb-text-dim); }
+
+/* Asset filter pills */
+#btcbot-overlay .bb-filter-bar {
+  padding: 6px 8px 0; display: flex; gap: 4px; flex-wrap: wrap;
+}
+#btcbot-overlay .bb-pill {
+  font: inherit; font-size: 10px; font-weight: 600; padding: 1px 8px;
+  border-radius: 999px; border: 1px solid var(--bb-border); background: transparent;
+  color: var(--bb-text-dim); cursor: pointer; line-height: 1.6;
+}
+#btcbot-overlay .bb-pill:hover { border-color: var(--bb-blue); color: var(--bb-text); }
+#btcbot-overlay .bb-pill-on {
+  background: var(--bb-blue); border-color: var(--bb-blue); color: #fff;
+}
+#btcbot-overlay .bb-pill-on:hover { color: #fff; }
+#btcbot-overlay .bb-asset {
+  font-weight: 650; font-size: 10px; color: var(--bb-text-dim);
+  background: var(--bb-separator); padding: 1px 5px; border-radius: 3px;
+  margin-right: 4px; vertical-align: middle;
+}
 
 /* live panel */
 #btcbot-overlay .bb-live-off {

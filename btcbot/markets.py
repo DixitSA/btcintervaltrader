@@ -76,13 +76,26 @@ def _parse_ts(value: Any) -> Optional[float]:
         return None
 
 
-def parse_strike(*texts: Any) -> Optional[float]:
+def _strike_bounds_for_prefix(prefix: str) -> tuple[float, float]:
+    upper = prefix.upper()
+    for sym, lo, hi in (("BTC", 1_000, 10_000_000), ("ETH", 100, 100_000), ("SOL", 1, 10_000)):
+        if sym in upper:
+            return (lo, hi)
+    return (1_000, 10_000_000)
+
+
+def parse_strike(*texts: Any, strike_min: float | None = None, strike_max: float | None = None) -> Optional[float]:
     """Pull the 'price to beat' out of market text.
 
     Returns None when it cannot be read unambiguously. Callers must skip the
     market rather than guess -- an incorrect strike silently inverts every
     signal that depends on it.
+
+    Pass *strike_min* and *strike_max* to override the default BTC bounds
+    (e.g. 1-10k for SOL, 100-100k for ETH).
     """
+    lo = strike_min if strike_min is not None else 1_000
+    hi = strike_max if strike_max is not None else 10_000_000
     for text in texts:
         if not text:
             continue
@@ -93,14 +106,13 @@ def parse_strike(*texts: Any) -> Optional[float]:
                 candidates.add(float(m.replace(",", "")))
             except ValueError:
                 continue
-        # Filter to plausible BTC prices to avoid picking up "$1" payout text.
-        plausible = {c for c in candidates if 1_000 <= c <= 10_000_000}
+        plausible = {c for c in candidates if lo <= c <= hi}
         if len(plausible) == 1:
             return plausible.pop()
     return None
 
 
-def parse_market(raw: dict[str, Any]) -> Optional[Market]:
+def parse_market(raw: dict[str, Any], strike_min: float | None = None, strike_max: float | None = None) -> Optional[Market]:
     token_ids = raw.get("clobTokenIds")
     if isinstance(token_ids, str):
         try:
@@ -140,5 +152,5 @@ def parse_market(raw: dict[str, Any]) -> Optional[Market]:
         end_ts=end_ts,
         volume=float(raw.get("volumeNum") or raw.get("volume") or 0.0),
         liquidity=float(raw.get("liquidityNum") or raw.get("liquidity") or 0.0),
-        strike=parse_strike(raw.get("description"), raw.get("question")),
+        strike=parse_strike(raw.get("description"), raw.get("question"), strike_min=strike_min, strike_max=strike_max),
     )

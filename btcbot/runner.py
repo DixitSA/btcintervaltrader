@@ -20,7 +20,7 @@ from .portfolio import Portfolio, mark_for
 from .recorder import SnapshotWriter
 from .risk import RiskManager
 from .shadow import ShadowLedger
-from .spot import SpotFeed
+from .spot import SpotFeed, SpotFeedManager
 from .strategies.base import Signal, Strategy
 from .venues import build_venue
 
@@ -42,7 +42,7 @@ class Runner:
         self.trade = trade
 
         self.venue = venue if venue is not None else build_venue(cfg)
-        self.spot = SpotFeed(cfg.spot_url)
+        self.spot_manager = SpotFeedManager(cfg.markets.families, cfg.spot_url)
         self.writer = SnapshotWriter(cfg.data_dir) if record else None
         self.fee_model = build_fee_model(cfg.venue, cfg.fees)
         self.risk = RiskManager(
@@ -98,9 +98,14 @@ class Runner:
                 directions=sc.directions,
             )
 
+    @property
+    def spot(self) -> SpotFeed:
+        """Backward-compat: first feed (usually BTCUSDT)."""
+        return self.spot_manager.first_feed
+
     def close(self) -> None:
         self.venue.close()
-        self.spot.close()
+        self.spot_manager.close()
         if self.writer:
             self.writer.close()
 
@@ -193,17 +198,23 @@ class Runner:
             self._outcome_store.append(rec)
             self.calibrator.observe(signal_prob, trade.pnl > 0)
 
+    def _spot_for(self, slug: str) -> Optional[float]:
+        family = self.cfg.markets.family_for(slug)
+        if family:
+            return self.spot_manager.price(family)
+        return self.spot_manager.first_price
+
     def _settle_shadow_expired(self, now: float) -> None:
         """Settle shadow records for any expired window, including those we
         never held a real position in."""
         if not self.shadow:
             return
-        spot_px = self.spot.price()
         for slug in self.shadow.unsettled_slugs():
             end_ts = self._window_end.get(slug, 0.0)
             if now <= end_ts + 60:
                 continue
             strike = self._strikes.get(slug)
+            spot_px = self._spot_for(slug)
             if spot_px is not None and strike is not None and strike > 0:
                 winning_side = "Up" if spot_px > strike else "Down"
             else:
@@ -215,10 +226,9 @@ class Runner:
     def _settle_expired(self, now: float) -> None:
         """Resolve positions whose window has ended.
 
-        Determines win/loss from BTC spot vs the market's strike. If the spot
+        Determines win/loss from spot vs the market's strike. If the spot
         feed or strike is unavailable, falls back to the last mark.
         """
-        spot_px = self.spot.price()
         for slug, pos in list(self.portfolio.positions.items()):
             end_ts = self._window_end.get(
                 slug, pos.entry_ts + self.cfg.markets.window_seconds
@@ -226,9 +236,9 @@ class Runner:
             if now <= end_ts + 60:
                 continue
 
+            spot_px = self._spot_for(slug)
             strike = self._strikes.get(slug)
             if spot_px is not None and strike is not None and strike > 0:
-                # BTC above strike -> UP wins, below strike -> DOWN wins
                 winning_side = "Up" if spot_px > strike else "Down"
                 source = f"spot ${spot_px:,.2f} vs strike ${strike:,.2f}"
             else:
@@ -275,24 +285,24 @@ class Runner:
 
     def tick(self) -> None:
         now = time.time()
-        spot_px = self.spot.price()
         self._settle_expired(now)
         self._settle_shadow_expired(now)
 
-        # Hand the strategy a measured volatility if it wants one. The window
-        # configured on the strategy drives both the measurement here and the
-        # annualisation inside it, so there is a single source of truth. The
-        # backtester does exactly the same thing from the recorded spot series.
-        vol_window = getattr(self.strategy, "realized_vol_window", None)
-        if vol_window:
-            self.strategy.current_realized_vol = self.spot.realized_vol(
-                float(vol_window)
-            )
+        vol_window = getattr(self.strategy, "realized_vol_window", None) if self.strategy else None
 
         for market in self._markets(now):
             remaining = market.seconds_remaining(now)
             if remaining <= 0 or remaining > self.cfg.markets.max_seconds_remaining:
                 continue
+
+            family = self.cfg.markets.family_for(market.slug)
+            spot_px = self.spot_manager.price(family) if family else self.spot_manager.first_price
+
+            # Set per-family vol before the strategy decides.
+            if vol_window and family:
+                self.strategy.current_realized_vol = self.spot_manager.realized_vol(
+                    family, float(vol_window)
+                )
 
             snap = self._snapshot(market, spot_px, now)
             if snap is None:

@@ -1,6 +1,8 @@
 (() => {
   const PANEL_ID = "btcbot-overlay";
   if (document.getElementById(PANEL_ID)) return;
+  let selectedFamily = "All";
+  let shadowFamily = "All";
 
   const panel = document.createElement("div");
   panel.id = PANEL_ID;
@@ -13,13 +15,14 @@
       <button class="bb-min" id="bb-min" aria-label="Collapse panel">–</button>
     </div>
     <div class="bb-body" id="bb-body">
-      <div class="bb-msg" id="bb-msg" role="status">connecting…</div>
+      <div class="bb-msg" id="bb-msg" role="status">Connecting to bot…</div>
       <div class="bb-tabs" id="bb-tabs" style="display:none" role="tablist">
         <button class="bb-tab bb-tab-active" data-tab="paper" role="tab" aria-selected="true" aria-controls="bb-paper-panel">Paper</button>
         <button class="bb-tab" data-tab="live" role="tab" aria-selected="false" aria-controls="bb-live-panel">Live</button>
       </div>
       <div id="bb-paper-panel" role="tabpanel" aria-live="polite"></div>
       <div id="bb-live-panel" style="display:none" role="tabpanel" aria-live="polite"></div>
+      <div class="bb-filter-bar" id="bb-family-filter"></div>
       <div id="bb-markets" aria-live="polite"></div>
       <div class="bb-foot">read-only · places no orders</div>
     </div>`;
@@ -69,6 +72,28 @@
     return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
   };
 
+  const FAMILIES = ["All", "BTC", "ETH", "SOL"];
+
+  function renderFamilyFilter() {
+    const bar = document.getElementById("bb-family-filter");
+    if (!bar) return "";
+    const key = "family-filter";
+    const html = FAMILIES.map((f) =>
+      `<button class="bb-pill${f === selectedFamily ? " bb-pill-on" : ""}" data-fam="${f}">${f}</button>`
+    ).join("");
+    setHTML(bar, key, html);
+  }
+
+  function renderShadowFilter() {
+    const bar = document.getElementById("bb-shadow-filter");
+    if (!bar) return "";
+    const key = "shadow-filter";
+    const html = FAMILIES.map((f) =>
+      `<button class="bb-pill${f === shadowFamily ? " bb-pill-on" : ""}" data-shadow="${f}">${f}</button>`
+    ).join("");
+    setHTML(bar, key, html);
+  }
+
   function sendBg(msg) {
     return new Promise((resolve) => {
       const timer = setTimeout(() => resolve({ ok: false, error: "timed out" }), 5000);
@@ -115,8 +140,8 @@
     let html = `<div class="bb-section-label">Trade history</div>
       <div class="bb-trade-summary">
         <span>${trades.length} closed</span>
-        <span class="bb-up">${wins}W</span>
-        <span class="bb-down">${trades.length - wins}L</span>
+        <span class="bb-up">${wins} won</span>
+        <span class="bb-down">${trades.length - wins} lost</span>
         <span class="bb-dim">${((wins / trades.length) * 100).toFixed(0)}%</span>
         <span class="bb-grow"></span>
         <span class="${netCls}">net ${usd(net)}</span>
@@ -139,9 +164,9 @@
           <span class="${cls} bb-dim">${ret}</span>
         </div>
         <div class="bb-trade-mid">
-          ${t.entry_price.toFixed(3)} → ${t.exit_price.toFixed(3)}
-          · ${t.shares.toFixed(1)} sh · stake ${usd(t.cost_basis)}
-          · fees ${usd(t.fees_paid)}
+          entered ${(t.entry_price * 100).toFixed(1)}¢ → exited ${(t.exit_price * 100).toFixed(1)}¢
+          · ${t.shares.toFixed(1)} shares · ${usd(t.cost_basis)} bet
+          · ${usd(t.fees_paid)} fees
         </div>
         <div class="bb-trade-bot">
           ${clockTime(t.exit_ts)} · held ${heldStr(t.held_seconds)} · ${reason}
@@ -170,7 +195,7 @@
 
     const pnlCls = p.pnl > 0 ? "bb-up" : p.pnl < 0 ? "bb-down" : "";
     const posDetail = (p.positions || []).length
-      ? p.positions.map((x) => `${x.side} ${x.shares.toFixed(1)}`).join(" · ")
+      ? p.positions.map((x) => `${x.side} ${x.shares.toFixed(1)} @ ${(x.entry_price * 100).toFixed(1)}¢`).join(" · ")
       : "none open";
 
     setHTML(paperPanel, "paper", `
@@ -179,13 +204,16 @@
         <div>
           <div class="bb-portfolio-row">
             <span class="${pnlCls}" style="font-size:15px;font-weight:650">P&L ${usd(p.pnl)}</span>
-            <span class="bb-dim">eq ${usd(p.equity)}</span>
+            <span class="bb-dim">value ${usd(p.equity)}</span>
           </div>
           <div class="bb-pos-detail">${posDetail}</div>
+          <div class="bb-dim" style="font-size:9px;padding-top:1px;line-height:1.3">
+            Floating — moves with the market. Not final until window ends.
+          </div>
         </div>
         <div class="bb-panel-stats">
-          <span class="bb-dim">closed: ${p.closed_trades} (${p.wins}W / ${p.losses}L)</span>
-          <span class="bb-dim">realized: ${usd(p.realized_pnl)}</span>
+          <span class="bb-dim">${p.closed_trades} closed (${p.wins} won, ${p.losses} lost)</span>
+          <span class="bb-dim">locked in: ${usd(p.realized_pnl)}</span>
         </div>
       </div>
       <div class="bb-status-line">
@@ -271,6 +299,8 @@
   let shadowReplayBusy = false;
 
   const RUNG_TABLE = { 0: "≤2m", 1: "≤4m", 2: "≤7m", 3: "≤15m" };
+  const DIR_LABEL = { follow: "With trend", fade: "Against trend" };
+  const DIR_SHORT = { follow: "Trend", fade: "Counter" };
 
   // Unit size for the "what would I have made" readout. Shadow records are
   // logged at a fixed notional (usually $1); P&L is exactly linear in
@@ -287,34 +317,46 @@
     if (!box) return;
 
     // Summary bar
-    let html = '<div class="bb-section-label">Shadow Ledger</div>';
+    let html = '<div class="bb-section-label">Simulated history</div>';
     if (status && status.exists) {
       html += `<div class="bb-shadow-summary">
-        <span>${status.records} records</span>
-        <span>${status.settled} settled</span>
-        <span>${status.windows} windows</span>
-        <span class="bb-dim">${status.unsettled_slugs} unsettled</span>
+        <span>${status.records} trades</span>
+        <span>${status.settled} resolved</span>
+        <span>${status.windows} rounds</span>
+        <span class="bb-dim">${status.unsettled_slugs} pending</span>
       </div>`;
     } else {
-      html += '<div class="bb-dim" style="padding:4px 0">no shadow data</div>';
+      html += '<div class="bb-dim" style="padding:4px 0">no simulation data yet</div>';
     }
 
     // Replay button
     const replayDisabled = shadowReplayBusy ? " disabled" : "";
     html += `<div class="bb-shadow-actions">
-      <button class="bb-btn${replayDisabled}" id="bb-shadow-replay">${shadowReplayBusy ? "replaying…" : "replay from snapshots"}</button>
+      <button class="bb-btn${replayDisabled}" id="bb-shadow-replay">${shadowReplayBusy ? "Running…" : "Run simulation"}</button>
     </div>`;
 
     // Replay result
     const resultEl = document.getElementById("bb-shadow-result");
     if (resultEl) html += resultEl.outerHTML;
 
+    // Shadow asset filter pills.
+    html += `<div class="bb-filter-bar" id="bb-shadow-filter">${FAMILIES.map((f) =>
+      `<button class="bb-pill${f === shadowFamily ? " bb-pill-on" : ""}" data-shadow="${f}">${f}</button>`
+    ).join("")}</div>`;
+
     // "What would I have made" -- per strategy, at the chosen unit size.
     if (rows && rows.length) {
+      const filteredRows = shadowFamily === "All"
+        ? rows
+        : rows.filter((r) => (r.family || "BTC").toUpperCase() === shadowFamily);
+      if (!filteredRows.length) {
+        setHTML(box, "shadow", `<div class="bb-dim" style="padding:4px 0">No data for ${shadowFamily}</div>`);
+        return;
+      }
       // Rank on LCB95, not on raw dollars. One longshot win at a 1c entry
       // returns ~100x notional and would otherwise top the table forever on a
       // sample of seven windows. LCB is the number that survives variance.
-      const ranked = rows.slice().sort((a, b) => b.lcb95 - a.lcb95);
+      const ranked = filteredRows.slice().sort((a, b) => b.lcb95 - a.lcb95);
       const best = ranked[0];
       const bestUsd = scaleToUnit(best);
       const proven = best.lcb95 > 0;
@@ -331,37 +373,39 @@
       </div>`;
 
       html += `<div class="bb-would-make">
-        <div class="bb-dim">best strategy so far (by LCB₉₅)</div>
+        <div class="bb-dim">Best strategy so far (highest confidence)</div>
         <div class="bb-would-headline ${bestCls}">${usd(bestUsd)}</div>
         <div class="bb-dim">
-          ${RUNG_TABLE[best.rung] || best.rung} · ${best.direction}
-          · ${best.windows} windows · ${(best.win_rate * 100).toFixed(1)}% win
+          ${RUNG_TABLE[best.rung] || best.rung} · ${DIR_LABEL[best.direction] || best.direction}
+          · ${best.windows} rounds · ${(best.win_rate * 100).toFixed(1)}% won
         </div>
         ${proven
           ? ""
-          : `<div class="bb-unproven">Not statistically real yet — LCB₉₅ is
-             ${best.lcb95.toFixed(3)}. Treat this figure as noise.</div>`}
+          : `<div class="bb-unproven">Not reliable yet — confidence score is
+             ${best.lcb95.toFixed(3)}. Treat this as a guess.</div>`}
         ${thinSample
-          ? `<div class="bb-unproven">${best.windows} windows. Needs 100+ before
-             any of this means anything.</div>`
+          ? `<div class="bb-unproven">Only ${best.windows} rounds so far. Need 100+ for
+             meaningful results.</div>`
           : ""}
       </div>`;
 
       // The overlay is ~380px wide; a 7-column table plus caveat swamps it.
       // Keep the headline always visible, put the breakdown behind a
       // disclosure. Cached rendering means the open state now survives polls.
-      html += `<details class="bb-details"><summary>per-rung breakdown (${rows.length} strategies)</summary>`;
+      html += `<details class="bb-details"><summary>Details by entry timing (${filteredRows.length} strategies)</summary>`;
       html += `<div class="bb-shadow-table-wrap"><table class="bb-shadow-table">
-        <tr><th>Rung</th><th>Dir</th><th>W</th><th>Win%</th><th>@$${unitUsd}</th><th>LCB₉₅</th><th>vsR0</th></tr>`;
-      for (const r of rows) {
+        <tr><th>Asset</th><th>Timing</th><th>Side</th><th>Rounds</th><th>Won</th><th>P&L</th><th>Confidence</th><th>vs fastest</th></tr>`;
+      for (const r of filteredRows) {
         const wrCls = r.win_rate > 0.5 ? "bb-up" : "bb-down";
         const dollars = scaleToUnit(r);
         const pnlCls = dollars > 0 ? "bb-up" : dollars < 0 ? "bb-down" : "";
         const lcbCls = r.lcb95 > 0 ? "bb-up" : r.lcb95 < 0 ? "bb-down" : "";
         const pairCls = r.paired_diff_r0 > 0 ? "bb-up" : r.paired_diff_r0 < 0 ? "bb-down" : "";
+        const recFam = (r.family || "BTC").toUpperCase();
         html += `<tr>
+          <td class="bb-dim"><b>${recFam}</b></td>
           <td class="bb-dim">${RUNG_TABLE[r.rung] || r.rung}</td>
-          <td class="bb-dim">${r.direction}</td>
+          <td class="bb-dim">${DIR_SHORT[r.direction] || r.direction}</td>
           <td class="bb-dim">${r.windows}</td>
           <td class="${wrCls}">${(r.win_rate * 100).toFixed(1)}</td>
           <td class="${pnlCls}"><b>${usd(dollars)}</b></td>
@@ -371,9 +415,8 @@
       }
       html += `</table></div>`;
       html += `<div class="bb-caveat">
-        Each row is a <b>separate</b> strategy — you cannot run follow and fade,
-        or several rungs, on the same window. Do not add these up.
-        Sample size is <b>windows</b>, not records.
+        Each row is a <b>separate</b> approach — you can only pick one per round.
+        Don't add them up. Sample size is <b>rounds</b>.
       </div></details>`;
     } else if (status && status.exists) {
       html += '<div class="bb-dim" style="padding:4px 0">no settled records yet</div>';
@@ -386,6 +429,19 @@
 
   // Delegated so the poll loop can re-render freely without leaking listeners.
   document.addEventListener("click", (e) => {
+    const famBtn = e.target.closest("[data-fam]");
+    if (famBtn) {
+      selectedFamily = famBtn.dataset.fam;
+      renderFamilyFilter();
+      return;
+    }
+    const shdBtn = e.target.closest("[data-shadow]");
+    if (shdBtn) {
+      shadowFamily = shdBtn.dataset.shadow;
+      renderShadowFilter();
+      return;
+    }
+
     const unitBtn = e.target.closest("#bb-unit-inc, #bb-unit-dec");
     if (unitBtn) {
       const i = UNIT_STEPS.indexOf(unitUsd);
@@ -407,7 +463,7 @@
       shadowReplayBusy = false;
       const replayRes = res && res.state;
       const resultHtml = replayRes && replayRes.ok
-        ? `<div class="bb-shadow-result" id="bb-shadow-result"><span class="bb-up">✓</span> ${replayRes.records} records (${replayRes.windows} windows)</div>`
+        ? `<div class="bb-shadow-result" id="bb-shadow-result"><span class="bb-up">✓</span> ${replayRes.records} trades (${replayRes.windows} rounds)</div>`
         : `<div class="bb-shadow-result bb-shadow-result-err" id="bb-shadow-result">✗ ${(replayRes && replayRes.error) || (res && res.error) || "failed"}</div>`;
       const existing = document.getElementById("bb-shadow-result");
       if (existing) existing.outerHTML = resultHtml;
@@ -422,14 +478,26 @@
   function renderMarkets(rows, volAnnual) {
     const box = document.getElementById("bb-markets");
     setText(document.getElementById("bb-vol"),
-      volAnnual != null ? "vol " + pct(volAnnual) : "—");
+      volAnnual != null ? "volatility " + pct(volAnnual) : "—");
+
+    // Build filter bar.
+    const filterBox = document.getElementById("bb-family-filter");
+    if (filterBox) renderFamilyFilter();
 
     if (!rows || !rows.length) {
-      setHTML(box, "markets", `<div class="bb-msg" style="display:block">no open windows in range</div>`);
+      setHTML(box, "markets", `  <div class="bb-msg" style="display:block">No markets open right now</div>`);
       return;
     }
 
-    setHTML(box, "markets", rows
+    const fam = (m) => (m.family || "BTC").toUpperCase();
+    const filtered = selectedFamily === "All" ? rows : rows.filter((m) => fam(m) === selectedFamily);
+
+    if (!filtered.length) {
+      setHTML(box, "markets", `<div class="bb-msg" style="display:block">No ${selectedFamily} windows open</div>`);
+      return;
+    }
+
+    setHTML(box, "markets", filtered
       .map((m) => {
         let edge = '<span class="bb-dim">—</span>';
         if (m.edge != null) {
@@ -441,21 +509,21 @@
           ? `<span class="bb-held">● ${m.slug}</span>`
           : m.slug;
         const spread = m.up_bid != null && m.up_ask != null
-          ? ` ${pct(m.up_bid)} / ${pct(m.up_ask)}`
+          ? ` bid ${pct(m.up_bid)} / ask ${pct(m.up_ask)}`
           : "";
         const impossible =
           m.breakeven_up != null && m.breakeven_up >= 1.0
-            ? `<div class="bb-warn">BE+fee exceeds $1 — cannot profit</div>`
+            ? `<div class="bb-warn">Break-even above $1 — can't profit</div>`
             : "";
         return `
         <div class="bb-mkt">
-          <div class="bb-slug">${slug}<span class="bb-left">${mmss(m.seconds_left)}</span></div>
-          ${spread ? `<div class="bb-spread">spread${spread}</div>` : ""}
+          <div class="bb-slug"><span class="bb-asset">${fam(m)}</span> ${slug}<span class="bb-left">${mmss(m.seconds_left)}</span></div>
+          ${spread ? `<div class="bb-spread">bid/ask${spread}</div>` : ""}
           <div class="bb-grid">
-            <span>market</span><b>${pct(m.market_p_up)}</b>
-            <span>model</span><b>${m.model_p_up == null ? "—" : pct(m.model_p_up)}</b>
-            <span>edge</span><b>${edge}</b>
-            <span>BE+fee</span><b>${pct(m.breakeven_up)}</b>
+            <span>Market odds</span><b>${pct(m.market_p_up)}</b>
+            <span>Bot's view</span><b>${m.model_p_up == null ? "—" : pct(m.model_p_up)}</b>
+            <span>Advantage</span><b>${edge}</b>
+            <span>Break-even</span><b>${pct(m.breakeven_up)}</b>
           </div>
           ${impossible}
         </div>`;

@@ -190,16 +190,31 @@ def parse_open_ts(raw: dict[str, Any]) -> Optional[float]:
     return None
 
 
-def parse_strike(raw: dict[str, Any]) -> Optional[float]:
+def _strike_bounds_for_prefix(prefix: str) -> tuple[float, float]:
+    """Reasonable fallback strike bounds when family config is unavailable."""
+    upper = prefix.upper()
+    for sym, lo, hi in (("BTC", 1_000, 10_000_000), ("ETH", 100, 100_000), ("SOL", 1, 10_000)):
+        if sym in upper:
+            return (lo, hi)
+    return (1_000, 10_000_000)
+
+
+def parse_strike(raw: dict[str, Any], strike_min: float | None = None, strike_max: float | None = None) -> Optional[float]:
     """The 'price to beat'.
 
     Kalshi exposes numeric strikes on range markets; the up/down series carries
     it in the text. Returns None when it cannot be read unambiguously -- a
     wrong strike silently inverts every model-based signal.
+
+    Pass *strike_min* and *strike_max* to override the asset-specific default
+    bounds (e.g. 1-10k for SOL, 100-100k for ETH).
     """
+    lo = strike_min if strike_min is not None else 1_000
+    hi = strike_max if strike_max is not None else 10_000_000
+
     for key in ("floor_strike", "cap_strike", "strike_value"):
         value = raw.get(key)
-        if isinstance(value, (int, float)) and 1_000 <= float(value) <= 10_000_000:
+        if isinstance(value, (int, float)) and lo <= float(value) <= hi:
             return float(value)
 
     for key in ("subtitle", "yes_sub_title", "title", "rules_primary"):
@@ -212,13 +227,13 @@ def parse_strike(raw: dict[str, Any]) -> Optional[float]:
                 found.add(float(match.replace(",", "")))
             except ValueError:
                 continue
-        plausible = {v for v in found if 1_000 <= v <= 10_000_000}
+        plausible = {v for v in found if lo <= v <= hi}
         if len(plausible) == 1:
             return plausible.pop()
     return None
 
 
-def parse_market(raw: dict[str, Any]) -> Optional[Market]:
+def parse_market(raw: dict[str, Any], strike_min: float | None = None, strike_max: float | None = None) -> Optional[Market]:
     ticker = str(raw.get("ticker") or "")
     if not ticker:
         return None
@@ -259,7 +274,7 @@ def parse_market(raw: dict[str, Any]) -> Optional[Market]:
             or _as_float(raw.get("open_interest"))
             or 0.0
         ),
-        strike=parse_strike(raw),
+        strike=parse_strike(raw, strike_min, strike_max),
     )
 
 

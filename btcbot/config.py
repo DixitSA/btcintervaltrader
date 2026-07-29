@@ -55,20 +55,76 @@ class FeeConfig:
 
 
 @dataclass
-class MarketsConfig:
-    # Every family of windows to trade. More families = more trades per hour.
-    # Polymarket runs 5m/15m/1h windows across several assets, so this is the
-    # honest way to raise throughput -- unlike shortening the hold, it does not
-    # change what you are betting on.
-    # Kalshi: series tickers (KXBTC15M). Polymarket: slug prefixes.
-    slug_prefixes: list[str] = field(default_factory=lambda: ["KXBTC15M"])
+class FamilyConfig:
+    """One asset family: market prefix + spot config + strike bounds.
+
+    `prefix` is the Kalshi series ticker (KXBTC15M) or Polymarket slug prefix
+    (btc-updown-15m).  `spot_symbol` is the Binance trading pair (BTCUSDT).
+    `display_name` is a short label for the UI (BTC, ETH, SOL).
+    """
+    prefix: str
+    spot_symbol: str = ""
+    display_name: str = ""
+    strike_min: float = 1_000
+    strike_max: float = 10_000_000
     window_seconds: int = 900
-    # Ignore a window until it has at least this much time left; and stop
-    # entering once it has less than min_seconds_remaining.
+
+    def __post_init__(self) -> None:
+        if not self.spot_symbol:
+            self.spot_symbol = _default_spot(self.prefix)
+        if not self.display_name:
+            self.display_name = _default_display(self.prefix)
+
+
+def _default_spot(prefix: str) -> str:
+    """Derive a Binance symbol from a Kalshi series or Polymarket slug."""
+    # KXBTC15M / KXETH15M / KXSOL15M → BTCUSDT / ETHUSDT / SOLUSDT
+    for sym in ("BTC", "ETH", "SOL"):
+        if sym in prefix.upper():
+            return f"{sym}USDT"
+    return "BTCUSDT"
+
+
+def _default_display(prefix: str) -> str:
+    for sym in ("BTC", "ETH", "SOL"):
+        if sym in prefix.upper():
+            return sym
+    return prefix
+
+
+@dataclass
+class MarketsConfig:
+    # Every family of windows to trade. Key is a short slug like "btc".
+    # Each family defines its market prefix, spot symbol, strike bounds,
+    # and window duration.  Global gates (min_seconds_remaining, spread,
+    # depth, etc.) apply across all families.
+    families: dict[str, FamilyConfig] = field(default_factory=lambda: {
+        "btc": FamilyConfig(prefix="KXBTC15M")
+    })
+    # Common gates (applied to every family entry attempt).
     max_seconds_remaining: int = 900
     min_seconds_remaining: int = 30
     min_book_depth_usd: float = 50.0
     max_spread: float = 0.05
+
+    @property
+    def slug_prefixes(self) -> list[str]:
+        return [f.prefix for f in self.families.values()]
+
+    @property
+    def window_seconds(self) -> int:
+        """Backward-compat: first family's window or 900."""
+        for f in self.families.values():
+            return f.window_seconds
+        return 900
+
+    def family_for(self, slug: str) -> str | None:
+        """Return the family key whose prefix matches *slug*, or None."""
+        slug_upper = slug.upper()
+        for key, fam in self.families.items():
+            if slug_upper.startswith(fam.prefix.upper()):
+                return key
+        return None
 
 
 @dataclass
@@ -226,11 +282,21 @@ def load_config(path: str | Path | None = None) -> Config:
         return cfg
 
     raw = yaml.safe_load(path.read_text()) or {}
-    # Backwards compatibility: a single slug_prefix still works.
     markets_raw = raw.get("markets") or {}
+
+    # Backward compat: upgrade old slug_prefixes to families.
     if "slug_prefix" in markets_raw:
         legacy = markets_raw.pop("slug_prefix")
         markets_raw.setdefault("slug_prefixes", [legacy] if isinstance(legacy, str) else legacy)
+    if "slug_prefixes" in markets_raw and "families" not in markets_raw:
+        prefixes = markets_raw.pop("slug_prefixes")
+        if isinstance(prefixes, str):
+            prefixes = [prefixes]
+        families = {}
+        for p in prefixes:
+            key = _family_key(p)
+            families[key] = FamilyConfig(prefix=p)
+        markets_raw["families"] = families
 
     for section, target in (
         ("risk", cfg.risk),
@@ -264,6 +330,15 @@ def load_config(path: str | Path | None = None) -> Config:
     if env_mode:
         cfg.mode = env_mode
     return cfg
+
+
+def _family_key(prefix: str) -> str:
+    """Derive a short key like 'btc' from a market prefix."""
+    upper = prefix.upper()
+    for sym in ("BTC", "ETH", "SOL"):
+        if sym in upper:
+            return sym.lower()
+    return upper.lower().replace("KX", "").replace("15M", "").replace("5M", "").replace("1H", "").strip("-")
 
 
 def require_live_confirmation() -> bool:

@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>btcbot — paper control panel</title>
+<title>btcbot - paper control panel</title>
 <style>
   :root {
     --bg: #0f1115; --panel: #171a21; --line: #262b36; --text: #e6e9ef;
@@ -80,12 +80,20 @@
     color: var(--dim); font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
   }
   .note {
-    border-left: 3px solid var(--warn); padding: 9px 12px; background: var(--panel);
-    border-radius: 0 8px 8px 0; color: var(--dim); font-size: 13px;
+    border-top: 2px solid var(--warn); padding: 9px 12px; background: var(--panel);
+    border-radius: 8px; color: var(--dim); font-size: 13px;
   }
-  .err { border-left-color: var(--down); color: var(--down); }
+  .err { border-top-color: var(--down); color: var(--down); }
   .bar { height: 5px; background: var(--line); border-radius: 3px; overflow: hidden; margin-top: 8px; }
   .bar > div { height: 100%; background: var(--accent); }
+  .filter-bar { display: inline-flex; gap: 4px; margin-left: 12px; vertical-align: middle; }
+  .pill-filter {
+    font: inherit; font-size: 11px; font-weight: 600; padding: 2px 9px;
+    border-radius: 999px; border: 1px solid var(--line); background: transparent;
+    color: var(--dim); cursor: pointer;
+  }
+  .pill-filter.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .pill-filter:hover:not(.active) { border-color: var(--accent); color: var(--text); }
 
   /* paper / live screens */
   .tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--line); }
@@ -121,7 +129,7 @@
 <body>
 <header>
   <h1>btcbot</h1>
-  <span class="pill" id="mode">—</span>
+  <span class="pill" id="mode">-</span>
   <span class="pill" id="status">connecting…</span>
   <span class="grow"></span>
   <button id="start" class="primary">Start paper trading</button>
@@ -137,7 +145,7 @@
   <div class="screen" id="paper-screen">
   <div id="error"></div>
   <details class="note" id="about">
-    <summary>Paper trading only — no code path here places a real order.</summary>
+    <summary>Paper trading only - no code path here places a real order.</summary>
     <div style="margin-top:8px">
       Model edge is only as good as the volatility behind it; the strategy
       declines to trade until it has measured one.
@@ -148,23 +156,23 @@
   <div class="row">
     <div class="card">
       <h2>Paper P&amp;L</h2>
-      <div class="big" id="pnl">—</div>
+      <div class="big" id="pnl">-</div>
       <div class="sub" id="equity">not started</div>
     </div>
     <div class="card">
       <h2>Open positions</h2>
-      <div class="big" id="npos">—</div>
-      <div class="sub" id="posdetail">—</div>
+      <div class="big" id="npos">-</div>
+      <div class="sub" id="posdetail">-</div>
     </div>
     <div class="card">
       <h2>Realized vol (annual)</h2>
-      <div class="big" id="vol">—</div>
+      <div class="big" id="vol">-</div>
       <div class="sub">model prices off this</div>
     </div>
     <div class="card">
       <h2>Snapshots recorded</h2>
-      <div class="big" id="snaps">—</div>
-      <div class="sub" id="snapsub">—</div>
+      <div class="big" id="snaps">-</div>
+      <div class="sub" id="snapsub">-</div>
       <div class="bar"><div id="snapbar" style="width:0%"></div></div>
     </div>
   </div>
@@ -185,21 +193,31 @@
   </div>
 
   <div class="card">
-    <h2>Open windows</h2>
+    <h2>
+      Open windows
+      <span class="filter-bar" id="market-filter">
+        <button class="pill-filter active" data-family="all">All</button>
+      </span>
+    </h2>
     <div class="scroll">
       <table>
         <thead><tr>
-          <th>market</th><th>left</th><th>spot</th><th>strike</th>
+          <th>market</th><th>asset</th><th>left</th><th>spot</th><th>strike</th>
           <th>up bid/ask</th><th>mkt P(up)</th><th>model P(up)</th><th>edge</th>
           <th>BE(up)+fee</th><th>volume</th>
         </tr></thead>
-        <tbody id="markets"><tr><td colspan="10" class="dim">loading…</td></tr></tbody>
+        <tbody id="markets"><tr><td colspan="11" class="dim">loading…</td></tr></tbody>
       </table>
     </div>
   </div>
 
   <div class="card">
-    <h2>Shadow ledger — what would I have made?</h2>
+    <h2>
+      Shadow ledger - what would I have made?
+      <span class="filter-bar" id="shadow-filter">
+        <button class="pill-filter active" data-shadow="All">All</button>
+      </span>
+    </h2>
     <div class="unit-bar">
       <span class="dim">unit size</span>
       <button class="unit-btn" id="unit-dec">–</button>
@@ -207,7 +225,7 @@
       <button class="unit-btn" id="unit-inc">+</button>
       <span class="dim">per trade</span>
       <span class="grow"></span>
-      <span class="dim" id="shadow-summary">—</span>
+      <span class="dim" id="shadow-summary">-</span>
       <button id="shadow-replay">replay from snapshots</button>
     </div>
     <div id="shadow-body"><div class="dim">loading…</div></div>
@@ -215,7 +233,7 @@
 
   <details class="card">
     <summary><h2 style="display:inline;margin:0">Session log</h2></summary>
-    <pre class="log" id="log" style="margin-top:10px">—</pre>
+    <pre class="log" id="log" style="margin-top:10px">-</pre>
   </details>
   </div><!-- /paper-screen -->
 
@@ -232,13 +250,40 @@ const $ = (id) => document.getElementById(id);
 const setText = (el, v) => { if (el && el.textContent !== v) el.textContent = v; };
 const setHTML = (el, v) => { if (el && el.innerHTML !== v) el.innerHTML = v; };
 const setCls  = (el, v) => { if (el && el.className !== v) el.className = v; };
-const pct = (v) => v == null ? "—" : (v * 100).toFixed(1) + "%";
-const p3  = (v) => v == null ? "—" : v.toFixed(3);
-const usd = (v) => v == null ? "—" : (v < 0 ? "-$" : "$") + Math.abs(v).toFixed(2);
-const num = (v) => v == null ? "—" : v.toLocaleString(undefined, {maximumFractionDigits: 0});
+const pct = (v) => v == null ? "-" : (v * 100).toFixed(1) + "%";
+const p3  = (v) => v == null ? "-" : v.toFixed(3);
+const usd = (v) => v == null ? "-" : (v < 0 ? "-$" : "$") + Math.abs(v).toFixed(2);
+const num = (v) => v == null ? "-" : v.toLocaleString(undefined, {maximumFractionDigits: 0});
+const FAMILIES = ["All", "BTC", "ETH", "SOL"];
+let selectedFamily = "All";
+let shadowFamily = "All";
+
+function renderFilter(barId, attr, active) {
+  const bar = $(barId);
+  if (!bar) return;
+  setHTML(bar, FAMILIES.map((f) =>
+    `<button class="pill-filter${f === active ? " active" : ""}" ${attr}="${f}">${f}</button>`
+  ).join(""));
+}
+renderFilter("market-filter", "data-family", selectedFamily);
+renderFilter("shadow-filter", "data-shadow", shadowFamily);
+document.addEventListener("click", (e) => {
+  const mktBtn = e.target.closest("[data-family]");
+  if (mktBtn) {
+    selectedFamily = mktBtn.dataset.family;
+    renderFilter("market-filter", "data-family", selectedFamily);
+    return;
+  }
+  const shdBtn = e.target.closest("[data-shadow]");
+  if (shdBtn) {
+    shadowFamily = shdBtn.dataset.shadow;
+    renderFilter("shadow-filter", "data-shadow", shadowFamily);
+    return;
+  }
+});
 
 function mmss(s) {
-  if (s == null) return "—";
+  if (s == null) return "-";
   s = Math.max(0, Math.round(s));
   return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
 }
@@ -280,7 +325,7 @@ function renderLive(s) {
     return;
   }
   setHTML($("live-body"), `
-    <div class="live-on">REAL MONEY — mode: live</div>
+    <div class="live-on">REAL MONEY - mode: live</div>
     <div class="row">
       <div class="card">
         <h2>Live P&amp;L</h2>
@@ -344,10 +389,18 @@ function renderShadow() {
     return;
   }
 
+  const filteredRows = shadowFamily === "All"
+    ? shadowRows
+    : shadowRows.filter((r) => (r.family || "BTC").toUpperCase() === shadowFamily);
+  if (!filteredRows.length) {
+    setHTML(box, `<div class="dim">No settled shadow records for ${shadowFamily} yet.</div>`);
+    return;
+  }
+
   // Rank on LCB95, not raw dollars. One longshot win at a 1c entry returns
   // ~100x notional and would otherwise top the table forever on a handful of
   // windows.
-  const best = shadowRows.slice().sort((a, b) => b.lcb95 - a.lcb95)[0];
+  const best = filteredRows.slice().sort((a, b) => b.lcb95 - a.lcb95)[0];
   const bestUsd = scaleToUnit(best);
   const proven = best.lcb95 > 0;
 
@@ -357,7 +410,7 @@ function renderShadow() {
     <div class="sub">${RUNG_LABEL[best.rung] || best.rung} · ${best.direction}
       · ${best.windows} windows · ${(best.win_rate * 100).toFixed(1)}% win rate
       · at ${usd(unitUsd)} per trade</div>
-    ${proven ? "" : `<div class="unproven">Not statistically real yet — LCB₉₅ is
+    ${proven ? "" : `<div class="unproven">Not statistically real yet - LCB₉₅ is
       ${best.lcb95.toFixed(3)}. Treat this figure as noise, not as money.</div>`}
     ${best.windows < 100 ? `<div class="unproven">${best.windows} windows recorded.
       Needs 100+ before any of this means anything.</div>` : ""}
@@ -365,12 +418,14 @@ function renderShadow() {
 
   html += `<div class="scroll"><table>
     <thead><tr>
-      <th>rung</th><th>direction</th><th>windows</th><th>win%</th>
+      <th>asset</th><th>timing</th><th>direction</th><th>windows</th><th>win%</th>
       <th>at $${unitUsd}/trade</th><th>mean P&L ($1)</th><th>LCB₉₅</th><th>vs rung 0</th>
     </tr></thead><tbody>`;
-  for (const r of shadowRows) {
+  for (const r of filteredRows) {
     const d = scaleToUnit(r);
+    const fam = (r.family || "BTC").toUpperCase();
     html += `<tr>
+      <td><b>${fam}</b></td>
       <td>${RUNG_LABEL[r.rung] || r.rung}</td>
       <td>${r.direction}</td>
       <td class="dim">${r.windows}</td>
@@ -379,15 +434,15 @@ function renderShadow() {
       <td class="dim">${r.mean_net_pnl.toFixed(4)}</td>
       <td class="${r.lcb95 > 0 ? "up" : "down"}">${r.lcb95.toFixed(4)}</td>
       <td class="${r.paired_diff_r0 > 0 ? "up" : r.paired_diff_r0 < 0 ? "down" : "dim"}">
-        ${r.paired_diff_r0 == null ? "—" : r.paired_diff_r0.toFixed(4)}</td>
+        ${r.paired_diff_r0 == null ? "-" : r.paired_diff_r0.toFixed(4)}</td>
     </tr>`;
   }
   html += `</tbody></table></div>`;
   html += `<div class="caveat">
-    Each row is a <b>separate</b> strategy — you cannot run follow and fade, or
+    Each row is a <b>separate</b> strategy - you cannot run follow and fade, or
     several rungs, on the same window, so these figures must not be added up.
     Sample size is <b>windows</b>, not records: rungs within one window share a
-    single BTC path and are not independent observations.
+    single price path and are not independent observations.
   </div>`;
 
   setHTML(box, html);
@@ -406,12 +461,12 @@ async function refreshShadow() {
 }
 
 const clockTime = (ts) => {
-  if (ts == null) return "—";
+  if (ts == null) return "-";
   const d = new Date(ts * 1000);
   return d.toLocaleTimeString(undefined, { hour12: false });
 };
 const heldStr = (s) => {
-  if (s == null) return "—";
+  if (s == null) return "-";
   s = Math.round(s);
   return s < 60 ? s + "s" : Math.floor(s / 60) + "m" + String(s % 60).padStart(2, "0") + "s";
 };
@@ -429,7 +484,7 @@ function renderTrades(trades, truncated) {
   const gross = trades.reduce((a, t) => a + t.pnl, 0);
   const fees = trades.reduce((a, t) => a + (t.fees_paid || 0), 0);
   setText($("trade-summary"),
-    `— ${trades.length} shown · ${wins}W / ${trades.length - wins}L`
+    `- ${trades.length} shown · ${wins}W / ${trades.length - wins}L`
     + ` · ${((wins / trades.length) * 100).toFixed(0)}% · net ${usd(gross)} after ${usd(fees)} fees`);
 
   setHTML(tb, trades.map((t) => {
@@ -451,7 +506,7 @@ function renderTrades(trades, truncated) {
       <td>${t.exit_price.toFixed(3)}</td>
       <td class="dim">${usd(t.cost_basis)}</td>
       <td class="${cls}"><b>${usd(t.pnl)}</b></td>
-      <td class="${cls}">${t.return_pct == null ? "—" : (t.return_pct * 100).toFixed(1) + "%"}</td>
+      <td class="${cls}">${t.return_pct == null ? "-" : (t.return_pct * 100).toFixed(1) + "%"}</td>
       <td class="dim">${usd(t.fees_paid)}</td>
       <td class="dim">${heldStr(t.held_seconds)}</td>
       <td class="dim">${reason}</td>
@@ -466,11 +521,17 @@ function renderTrades(trades, truncated) {
 function renderMarkets(rows) {
   const tb = $("markets");
   if (!rows || !rows.length) {
-    setHTML(tb, '<tr><td colspan="10" class="dim">no open windows in range</td></tr>');
+    setHTML(tb, '<tr><td colspan="11" class="dim">no open windows in range</td></tr>');
     return;
   }
-  setHTML(tb, rows.map((m) => {
-    let edgeCell = '<span class="dim">—</span>';
+  const family = (m) => (m.family || "BTC").toUpperCase();
+  const filtered = selectedFamily === "All" ? rows : rows.filter((m) => family(m) === selectedFamily);
+  if (!filtered.length) {
+    setHTML(tb, `<tr><td colspan="11" class="dim">no ${selectedFamily} windows open</td></tr>`);
+    return;
+  }
+  setHTML(tb, filtered.map((m) => {
+    let edgeCell = '<span class="dim">-</span>';
     if (m.edge != null) {
       const cls = m.edge > 0 ? "up" : "down";
       edgeCell = `<span class="${cls}">${m.edge > 0 ? "+" : ""}${(m.edge * 100).toFixed(1)}pp</span>`;
@@ -478,16 +539,15 @@ function renderMarkets(rows) {
     const name = m.held
       ? `<span class="held">● ${m.slug}</span>`
       : m.slug;
-    // A break-even above 1.0 means the entry price plus fees exceeds the $1
-    // payout: the trade cannot profit at ANY win rate. Worth shouting about.
     let beCell = pct(m.breakeven_up);
     if (m.breakeven_up != null && m.breakeven_up >= 1.0) {
-      beCell = `<span class="down" title="entry + fee exceeds the $1 payout — impossible to profit">${pct(m.breakeven_up)} ✕</span>`;
+      beCell = `<span class="down" title="entry + fee exceeds the $1 payout - impossible to profit">${pct(m.breakeven_up)} ✕</span>`;
     }
     return `<tr>
       <td>${name}</td>
+      <td><b>${family(m)}</b></td>
       <td>${mmss(m.seconds_left)}</td>
-      <td>${m.spot == null ? "—" : num(m.spot)}</td>
+      <td>${m.spot == null ? "-" : num(m.spot)}</td>
       <td>${m.strike == null ? '<span class="warn">none</span>' : num(m.strike)}</td>
       <td>${p3(m.up_bid)} / ${p3(m.up_ask)}</td>
       <td>${pct(m.market_p_up)}</td>
@@ -523,7 +583,7 @@ async function refresh() {
   const bits = Object.entries(params).map(([k, v]) => `${k}=${v}`).join(", ");
   let why = "";
   if (s.strategy === "volume_threshold" && !(params.assumed_edge > 0)) {
-    why = " — assumed_edge is 0, so this strategy claims no advantage over the "
+    why = " - assumed_edge is 0, so this strategy claims no advantage over the "
         + "market and the risk layer declines every trade. That is the honest "
         + "default, not a fault. Raise it in config.yaml only to measure, never "
         + "because you want trades.";
@@ -541,15 +601,15 @@ async function refresh() {
       ? p.positions.map((x) => `${x.side} ${x.shares.toFixed(1)} @ ${x.entry_price.toFixed(3)}`).join(" · ")
       : "none open");
   } else {
-    setText($("pnl"), "—");
+    setText($("pnl"), "-");
     setCls($("pnl"), "big");
     setText($("equity"), "not started");
-    setText($("npos"), "—");
+    setText($("npos"), "-");
     setText($("posdetail"), "start paper trading to track positions");
   }
 
   const vol = (s.markets && s.markets.length) ? s.markets[0].vol_annual : null;
-  setText($("vol"), vol == null ? "—" : pct(vol));
+  setText($("vol"), vol == null ? "-" : pct(vol));
 
   renderLive(s);
 
@@ -565,7 +625,7 @@ async function refresh() {
 
   renderTrades(p.trades, p.trades_truncated);
   renderMarkets(s.markets);
-  setText($("log"), (s.log || []).join("\n") || "—");
+  setText($("log"), (s.log || []).join("\n") || "-");
 }
 
 refresh();

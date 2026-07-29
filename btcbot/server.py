@@ -38,16 +38,32 @@ MAX_TRADES_IN_STATE = 100
 
 
 def seed_spot_history(spot_feed, data_dir: str, tail_bytes: int = 2_000_000) -> int:
-    """Preload the spot feed from snapshots already on disk.
+    """Preload a single spot feed from snapshots already on disk."""
+    return _seed_one(spot_feed, data_dir, tail_bytes)
 
-    Without this the volatility estimator needs to observe half its lookback
-    live before it will report anything -- around 8 minutes at a 900s window --
-    and until then the model declines every trade. The recorder has usually
-    been running for hours, so the history is right there.
 
-    Reads only the tail of the newest file so this stays cheap as the dataset
-    grows into days.
+def seed_spot_manager(manager, data_dir: str, tail_bytes: int = 2_000_000) -> int:
+    """Preload all spot feeds from snapshot data on disk.
+
+    Recorded snapshots carry a single `spot` field (BTC).  Newer data may
+    carry per-family spots once the recorder is updated; for now only BTC
+    is seeded from history, and other feeds start cold.
     """
+    total = 0
+    for sym in list(manager._feeds.keys()):
+        total += _seed_one(manager._feed(sym), data_dir, tail_bytes)
+    # Seed the first (BTC) feed even if not yet created.
+    if total == 0:
+        from .config import FamilyConfig
+
+        for fam in manager._families.values():
+            total += _seed_one(manager._feed(fam.spot_symbol), data_dir, tail_bytes)
+            break
+    return total
+
+
+def _seed_one(feed, data_dir: str, tail_bytes: int) -> int:
+    """Preload *feed* from the `spot` field in recorded snapshots."""
     directory = Path(data_dir)
     if not directory.exists():
         return 0
@@ -61,7 +77,7 @@ def seed_spot_history(spot_feed, data_dir: str, tail_bytes: int = 2_000_000) -> 
         with newest.open("rb") as fh:
             if size > tail_bytes:
                 fh.seek(size - tail_bytes)
-                fh.readline()  # discard the partial line
+                fh.readline()
             raw = fh.read().decode("utf-8", errors="replace")
     except OSError as exc:
         log.warning("could not seed spot history: %s", exc)
@@ -79,13 +95,12 @@ def seed_spot_history(spot_feed, data_dir: str, tail_bytes: int = 2_000_000) -> 
         ts, spot = row.get("ts"), row.get("spot")
         if ts is None or spot is None:
             continue
-        # Spot is global; concurrent markets repeat it at the same timestamp.
         if points and points[-1][0] >= float(ts):
             continue
         points.append((float(ts), float(spot)))
 
     for point in points:
-        spot_feed._history.append(point)
+        feed._history.append(point)
     return len(points)
 
 
@@ -107,8 +122,9 @@ class MarketView:
     model_p_up: Optional[float]
     edge: Optional[float]
     vol_annual: Optional[float]
-    entry_fee_100: Optional[float]
-    breakeven_up: Optional[float]
+    family: str = "btc"
+    entry_fee_100: Optional[float] = None
+    breakeven_up: Optional[float] = None
     held: bool = False
 
     def to_dict(self) -> dict[str, Any]:
@@ -233,30 +249,37 @@ class PaperSession:
         """
         runner = self._active_runner()
         now = time.time()
-        spot_px = runner.spot.price()
 
-        vol_annual = None
+        from .signals import annualize
+
         strategy = getattr(self._runner, "strategy", None) if self._runner else None
-        window = getattr(strategy, "realized_vol_window", None) if strategy else None
-        if window:
-            strategy.current_realized_vol = runner.spot.realized_vol(float(window))
-            vol_annual = strategy._vol()
-        if vol_annual is None:
-            # Show a measurement even when no strategy is loaded, so the panel
-            # is informative before you press start.
-            from .signals import annualize
-
-            measured = runner.spot.realized_vol(900.0)
-            vol_annual = annualize(measured, 900.0) if measured else None
+        vol_window = getattr(strategy, "realized_vol_window", None) if strategy else None
 
         out: list[MarketView] = []
         for market in runner._markets(now):
             remaining = market.seconds_remaining(now)
             if remaining <= 0 or remaining > self.cfg.markets.max_seconds_remaining:
                 continue
+
+            family = self.cfg.markets.family_for(market.slug)
+            spot_px = runner.spot_manager.price(family) if family else runner.spot_manager.first_price
+
             snap = runner._snapshot(market, spot_px, now)
             if snap is None:
                 continue
+
+            # Per-family vol.
+            vol_annual = None
+            if vol_window and family:
+                strategy.current_realized_vol = runner.spot_manager.realized_vol(
+                    family, float(vol_window)
+                )
+                vol_annual = strategy._vol()
+            if vol_annual is None:
+                measured = runner.spot_manager.realized_vol(family, 900.0) if family else None
+                if measured is None:
+                    measured = runner.spot_manager.first_feed.realized_vol(900.0)
+                vol_annual = annualize(measured, 900.0) if measured else None
 
             market_p = market_implied_up(snap)
             model_p = None
@@ -291,6 +314,7 @@ class PaperSession:
                     model_p_up=model_p,
                     edge=(model_p - market_p) if (model_p and market_p) else None,
                     vol_annual=vol_annual,
+                    family=family or "btc",
                     entry_fee_100=fee100,
                     breakeven_up=breakeven_up,
                     held=held,
@@ -473,9 +497,13 @@ class PaperSession:
                     if diffs:
                         paired_diff = sum(diffs) / len(diffs)
 
+                # Infer family from the first record's slug prefix.
+                first_slug = recs[0].slug if recs else ""
+                row_family = self.cfg.markets.family_for(first_slug) or "btc"
                 rows.append({
                     "rung": rung,
                     "direction": direction,
+                    "family": row_family,
                     "windows": n_windows,
                     "records": n_records,
                     "win_rate": round(win_rate, 4),

@@ -23,16 +23,29 @@ clob_url: https://clob.polymarket.com
 spot_url: https://data-api.binance.vision
 
 markets:
-  # Every window family to trade. ONE 15-minute family caps you at 4 trades/hour
-  # (one window at a time). Adding families is the honest way to raise trade
-  # count -- it does not change what you are betting on. Uncomment to widen:
-  # Kalshi: SERIES TICKERS. Polymarket: slug prefixes.
-  slug_prefixes:
-    - KXBTC15M          # Bitcoin up/down, 15-minute windows
-    # - KXETH15M        # Ethereum, 15-minute
-    # - KXBTCD          # Bitcoin, daily
-    # Polymarket equivalents: btc-updown-15m, btc-updown-5m, eth-updown-15m
-  window_seconds: 900
+  # Every window family to trade. Key is a short label (btc, eth, sol).
+  # Each family defines its Kalshi series ticker (prefix), Binance spot
+  # symbol, and strike price bounds.  Adding families is the honest way
+  # to raise trade count -- it does not change what you are betting on.
+  families:
+    btc:
+      prefix: KXBTC15M
+      spot_symbol: BTCUSDT
+      display_name: BTC
+      strike_min: 1_000
+      strike_max: 10_000_000
+    # eth:
+    #   prefix: KXETH15M
+    #   spot_symbol: ETHUSDT
+    #   display_name: ETH
+    #   strike_min: 100
+    #   strike_max: 100_000
+    # sol:
+    #   prefix: KXSOL15M
+    #   spot_symbol: SOLUSDT
+    #   display_name: SOL
+    #   strike_min: 1
+    #   strike_max: 10_000
   # Do not enter in the last 30s: the book thins and you are racing bots with
   # colocated infrastructure you do not have.
   min_seconds_remaining: 30
