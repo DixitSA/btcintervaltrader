@@ -597,6 +597,9 @@ def cmd_shadow_replay(args: argparse.Namespace) -> int:
     records = ledger.load_records()
     unsettled = sum(1 for r in records if r.won is None)
     print(f"shadow replay: {len(records)} records ({unsettled} unsettled) -> {output}")
+    if ledger.skips:
+        detail = ", ".join(f"{k}={v}" for k, v in sorted(ledger.skips.items()))
+        print(f"  skipped entries: {detail}")
     print(f"  {len(windows)} windows, {len(snapshots)} snapshots")
     return 0
 

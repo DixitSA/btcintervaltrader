@@ -165,3 +165,47 @@
 #btcbot-overlay .bb-shadow-result-err {
   background: rgba(248, 81, 73, .12); color: #f85149;
 }
+
+/* unit-size selector + "what would I have made" readout */
+#btcbot-overlay .bb-unit-bar {
+  display: flex; align-items: center; gap: 6px; font-size: 11px;
+  padding: 6px 0 4px; border-top: 1px solid #23272f; margin-top: 6px;
+}
+#btcbot-overlay .bb-unit-btn {
+  font: inherit; font-size: 12px; line-height: 1; width: 20px; height: 20px;
+  border: 1px solid #30363d; border-radius: 4px; background: #161b22;
+  color: #e6e9ef; cursor: pointer; padding: 0;
+}
+#btcbot-overlay .bb-unit-btn:hover { background: #21262d; border-color: #58a6ff; }
+#btcbot-overlay .bb-unit-val {
+  font-weight: 650; font-variant-numeric: tabular-nums; min-width: 34px; text-align: center;
+}
+#btcbot-overlay .bb-would-make {
+  padding: 6px 8px; margin: 2px 0 6px; border-radius: 6px;
+  background: rgba(88, 166, 255, .07); border: 1px solid #23272f;
+}
+#btcbot-overlay .bb-would-headline {
+  font-size: 20px; font-weight: 700; line-height: 1.2;
+  font-variant-numeric: tabular-nums; margin: 1px 0 2px;
+}
+#btcbot-overlay .bb-unproven {
+  font-size: 9.5px; line-height: 1.45; color: #d29922; margin-top: 4px;
+}
+#btcbot-overlay .bb-caveat {
+  font-size: 9px; line-height: 1.45; color: #6e7681; padding: 5px 0 2px;
+}
+#btcbot-overlay .bb-caveat b { color: #8b949e; }
+
+/* live panel */
+#btcbot-overlay .bb-live-off {
+  padding: 8px; border-radius: 6px; background: #161b22;
+  border: 1px solid #23272f; font-size: 11px;
+}
+#btcbot-overlay .bb-live-off-title {
+  font-weight: 650; color: #e6e9ef; margin-bottom: 3px;
+}
+#btcbot-overlay .bb-live-on {
+  padding: 5px 8px; margin: 2px 0 6px; border-radius: 5px; font-size: 11px;
+  font-weight: 700; letter-spacing: .04em;
+  background: rgba(248, 81, 73, .14); color: #f85149; border: 1px solid rgba(248, 81, 73, .4);
+}

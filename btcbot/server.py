@@ -446,6 +446,11 @@ class PaperSession:
                     "records": n_records,
                     "win_rate": round(win_rate, 4),
                     "mean_net_pnl": round(mean_pnl, 6),
+                    "total_net_pnl": round(sum(r.net_pnl for r in recs), 6),
+                    # Notional each record was sized at. The UI rescales to the
+                    # user's unit size; P&L is linear in notional so this is
+                    # exact, not an approximation.
+                    "notional_usd": self.cfg.shadow.notional_usd or 1.0,
                     "lcb95": round(lcb, 6),
                     "paired_diff_r0": round(paired_diff, 6) if paired_diff is not None else None,
                 })

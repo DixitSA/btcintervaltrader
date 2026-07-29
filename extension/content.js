@@ -14,7 +14,7 @@
     </div>
     <div class="bb-body" id="bb-body">
       <div class="bb-msg" id="bb-msg">connecting…</div>
-      <div id="bb-tabs" style="display:none">
+      <div class="bb-tabs" id="bb-tabs" style="display:none">
         <button class="bb-tab bb-tab-active" data-tab="paper">Paper</button>
         <button class="bb-tab" data-tab="live">Live</button>
       </div>
@@ -113,9 +113,41 @@
       </div>
       <div id="bb-shadow-section"></div>`;
 
+    renderLivePanel(livePanel, p, mode);
+  }
+
+  function renderLivePanel(livePanel, p, mode) {
+    const isLive = mode === "live";
+    if (!isLive) {
+      livePanel.innerHTML = `
+        <div class="bb-section-label">Live Trading</div>
+        <div class="bb-live-off">
+          <div class="bb-live-off-title">Not trading real money</div>
+          <div class="bb-dim">config mode: <b>${mode || "paper"}</b></div>
+          <div class="bb-dim" style="margin-top:6px">
+            Live requires <b>mode: live</b> in config.yaml and
+            <b>BTCBOT_I_UNDERSTAND_REAL_MONEY=yes</b>.
+          </div>
+        </div>
+        <div class="bb-foot" style="padding-top:6px">
+          This panel never places orders. It is a read-only view.
+        </div>`;
+      return;
+    }
+    const pnlCls = p && p.pnl > 0 ? "bb-up" : p && p.pnl < 0 ? "bb-down" : "";
     livePanel.innerHTML = `
       <div class="bb-section-label">Live Trading</div>
-      <div class="bb-dim" style="padding:6px 0">not available (paper mode)</div>`;
+      <div class="bb-live-on">REAL MONEY — mode: live</div>
+      <div class="bb-panel-grid">
+        <div class="bb-portfolio-row">
+          <span class="${pnlCls}" style="font-size:15px;font-weight:650">P&L ${usd(p && p.pnl)}</span>
+          <span class="bb-dim">eq ${usd(p && p.equity)}</span>
+        </div>
+        <div class="bb-panel-stats">
+          <span class="bb-dim">closed: ${(p && p.closed_trades) ?? 0} (${(p && p.wins) ?? 0}W / ${(p && p.losses) ?? 0}L)</span>
+          <span class="bb-dim">realized: ${usd(p && p.realized_pnl)}</span>
+        </div>
+      </div>`;
   }
 
   function renderControls(s) {
@@ -152,6 +184,16 @@
 
   const RUNG_TABLE = { 0: "≤2m", 1: "≤4m", 2: "≤7m", 3: "≤15m" };
 
+  // Unit size for the "what would I have made" readout. Shadow records are
+  // logged at a fixed notional (usually $1); P&L is exactly linear in
+  // notional, so rescaling is exact rather than an estimate.
+  let unitUsd = Number(localStorage.getItem("bb-unit-usd")) || 5;
+
+  const scaleToUnit = (row) => {
+    const notional = row.notional_usd || 1;
+    return (row.total_net_pnl / notional) * unitUsd;
+  };
+
   function renderShadowTab(status, rows) {
     const box = document.getElementById("bb-shadow-section");
     if (!box) return;
@@ -179,27 +221,68 @@
     const resultEl = document.getElementById("bb-shadow-result");
     if (resultEl) html += resultEl.outerHTML;
 
-    // Report table
+    // "What would I have made" -- per strategy, at the chosen unit size.
     if (rows && rows.length) {
+      // Rank on LCB95, not on raw dollars. One longshot win at a 1c entry
+      // returns ~100x notional and would otherwise top the table forever on a
+      // sample of seven windows. LCB is the number that survives variance.
+      const ranked = rows.slice().sort((a, b) => b.lcb95 - a.lcb95);
+      const best = ranked[0];
+      const bestUsd = scaleToUnit(best);
+      const proven = best.lcb95 > 0;
+      const bestCls = !proven ? "bb-dim" : bestUsd > 0 ? "bb-up" : "bb-down";
+      const thinSample = best.windows < 30;
+
+      html += `<div class="bb-unit-bar">
+        <span class="bb-dim">unit size</span>
+        <button class="bb-unit-btn" id="bb-unit-dec">–</button>
+        <span class="bb-unit-val">$${unitUsd}</span>
+        <button class="bb-unit-btn" id="bb-unit-inc">+</button>
+        <span class="bb-grow"></span>
+        <span class="bb-dim">per trade</span>
+      </div>`;
+
+      html += `<div class="bb-would-make">
+        <div class="bb-dim">best strategy so far (by LCB₉₅)</div>
+        <div class="bb-would-headline ${bestCls}">${usd(bestUsd)}</div>
+        <div class="bb-dim">
+          ${RUNG_TABLE[best.rung] || best.rung} · ${best.direction}
+          · ${best.windows} windows · ${(best.win_rate * 100).toFixed(1)}% win
+        </div>
+        ${proven
+          ? ""
+          : `<div class="bb-unproven">Not statistically real yet — LCB₉₅ is
+             ${best.lcb95.toFixed(3)}. Treat this figure as noise.</div>`}
+        ${thinSample
+          ? `<div class="bb-unproven">${best.windows} windows. Needs 100+ before
+             any of this means anything.</div>`
+          : ""}
+      </div>`;
+
       html += `<div class="bb-shadow-table-wrap"><table class="bb-shadow-table">
-        <tr><th>Rung</th><th>Dir</th><th>W</th><th>R</th><th>Win%</th><th>Mean$</th><th>LCB₉₅</th><th>vsR0</th></tr>`;
+        <tr><th>Rung</th><th>Dir</th><th>W</th><th>Win%</th><th>@$${unitUsd}</th><th>LCB₉₅</th><th>vsR0</th></tr>`;
       for (const r of rows) {
         const wrCls = r.win_rate > 0.5 ? "bb-up" : "bb-down";
-        const pnlCls = r.mean_net_pnl > 0 ? "bb-up" : r.mean_net_pnl < 0 ? "bb-down" : "";
+        const dollars = scaleToUnit(r);
+        const pnlCls = dollars > 0 ? "bb-up" : dollars < 0 ? "bb-down" : "";
         const lcbCls = r.lcb95 > 0 ? "bb-up" : r.lcb95 < 0 ? "bb-down" : "";
         const pairCls = r.paired_diff_r0 > 0 ? "bb-up" : r.paired_diff_r0 < 0 ? "bb-down" : "";
         html += `<tr>
           <td class="bb-dim">${RUNG_TABLE[r.rung] || r.rung}</td>
-          <td>${r.direction === "up" ? "▲" : "▼"}</td>
+          <td class="bb-dim">${r.direction}</td>
           <td class="bb-dim">${r.windows}</td>
-          <td class="bb-dim">${r.records}</td>
           <td class="${wrCls}">${(r.win_rate * 100).toFixed(1)}</td>
-          <td class="${pnlCls}">${r.mean_net_pnl.toFixed(4)}</td>
+          <td class="${pnlCls}"><b>${usd(dollars)}</b></td>
           <td class="${lcbCls}">${r.lcb95.toFixed(4)}</td>
           <td class="${pairCls}">${r.paired_diff_r0 != null ? r.paired_diff_r0.toFixed(4) : "—"}</td>
         </tr>`;
       }
       html += `</table></div>`;
+      html += `<div class="bb-caveat">
+        Each row is a <b>separate</b> strategy — you cannot run follow and fade,
+        or several rungs, on the same window. Do not add these up.
+        Sample size is <b>windows</b>, not records.
+      </div>`;
     } else if (status && status.exists) {
       html += '<div class="bb-dim" style="padding:4px 0">no settled records yet</div>';
     }
@@ -207,8 +290,23 @@
     box.innerHTML = html;
   }
 
-  // Single delegated click handler for shadow panel (avoids listener leaks during poll)
+  const UNIT_STEPS = [1, 2, 5, 10, 25, 50, 100];
+
+  // Delegated so the poll loop can re-render freely without leaking listeners.
   document.addEventListener("click", (e) => {
+    const unitBtn = e.target.closest("#bb-unit-inc, #bb-unit-dec");
+    if (unitBtn) {
+      const i = UNIT_STEPS.indexOf(unitUsd);
+      const cur = i === -1 ? UNIT_STEPS.indexOf(5) : i;
+      const next = unitBtn.id === "bb-unit-inc"
+        ? Math.min(cur + 1, UNIT_STEPS.length - 1)
+        : Math.max(cur - 1, 0);
+      unitUsd = UNIT_STEPS[next];
+      try { localStorage.setItem("bb-unit-usd", String(unitUsd)); } catch (_) {}
+      renderShadowTab(shadowStatus, shadowReport);
+      return;
+    }
+
     const btn = e.target.closest("#bb-shadow-replay");
     if (!btn || btn.disabled) return;
     shadowReplayBusy = true;
@@ -319,10 +417,15 @@
     });
   }
 
+  // The report is heavier than the status ping, so fetch it less often. Without
+  // this it only loaded after a manual replay, leaving the P&L readout blank.
+  let pollCount = 0;
   function poll() {
     sendBg({ type: "GET_STATE" }).then((res) => {
       render(res);
       fetchShadowStatus();
+      if (pollCount % 5 === 0) maybeFetchShadowReport();
+      pollCount += 1;
       setTimeout(poll, 2000);
     });
   }

@@ -44,6 +44,14 @@ RUNG_DEFS: list[tuple[int, float, float]] = [
 
 DIRECTIONS = ["follow", "fade"]
 
+# Kalshi quotes in whole cents. A book showing an ask outside [0.01, 0.99] is
+# a derived or one-sided artifact, not a price anyone could have traded --
+# recording it mints contracts at a fill that never existed. At $1 notional a
+# 0.001 ask buys 1000 contracts and a single "win" returns ~$999, which then
+# dominates every statistic downstream.
+MIN_TICK = 0.01
+MAX_TICK = 0.99
+
 
 @dataclass
 class ShadowRecord:
@@ -133,6 +141,8 @@ class ShadowLedger:
         enabled: bool = True,
         notional_usd: float = 1.0,
         directions: Optional[list[str]] = None,
+        min_price: float = MIN_TICK,
+        max_price: float = MAX_TICK,
     ):
         self.path = Path(ledger_path) if ledger_path else None
         self.producer = producer
@@ -141,6 +151,11 @@ class ShadowLedger:
         self.enabled = enabled
         self.notional_usd = float(notional_usd)
         self.directions = list(directions) if directions else list(DIRECTIONS)
+        self.min_price = float(min_price)
+        self.max_price = float(max_price)
+        # Skips are counted, not silent: dropping entries without a record of
+        # why measures a rosier market than the one that exists.
+        self.skips: dict[str, int] = {}
 
         if producer == "history" and self.path:
             self._assert_history_path()
@@ -171,6 +186,9 @@ class ShadowLedger:
                     self._dedup.add(key)
                 except (json.JSONDecodeError, TypeError, ValueError) as exc:
                     log.warning("skipping bad shadow record: %s", exc)
+
+    def _skip(self, reason: str) -> None:
+        self.skips[reason] = self.skips.get(reason, 0) + 1
 
     def already_recorded(self, slug: str, rung: int, direction: str) -> bool:
         return _dedup_key(slug, rung, direction) in self._dedup
@@ -207,11 +225,18 @@ class ShadowLedger:
                 continue
             side = side_fn(snap)
             if side is None:
+                self._skip("no_side")
                 continue
 
             book = snap.book(side)
             ask = book.best_ask
             if ask is None or ask <= 0:
+                self._skip("no_ask")
+                continue
+
+            # Reject untradeable prices before sizing off them.
+            if ask < self.min_price or ask > self.max_price:
+                self._skip("price_outside_tick_range")
                 continue
 
             spread = book.spread
@@ -222,6 +247,7 @@ class ShadowLedger:
 
             avg_price = book.sweep_cost(contracts)
             if avg_price is None:
+                self._skip("book_too_thin")
                 continue
 
             fee = self.fee_model.entry_fee(contracts, avg_price) if self.fee_model else 0.0
