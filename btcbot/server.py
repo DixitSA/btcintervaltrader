@@ -18,6 +18,7 @@ import json
 import logging
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -206,6 +207,9 @@ class PaperSession:
         self._thread: Optional[threading.Thread] = None
         self._runner = None
         self._display_runner = None
+        # (ts, equity) once per tick. 5400 samples is ~3h at a 2s poll; the
+        # chart downsamples for display, so the cap is about memory, not detail.
+        self._equity_samples: deque[tuple[float, float]] = deque(maxlen=5400)
 
     # -- lifecycle -----------------------------------------------------
 
@@ -259,6 +263,23 @@ class PaperSession:
                 log.warning("closing runner: %s", exc)
             self._runner = None
 
+    def _sample_equity(self, runner) -> None:
+        """Record (ts, equity) once per tick.
+
+        The curve used to be built from closed trades alone, so with one
+        concurrent position and 15-minute windows it only gained a point every
+        several minutes and looked frozen. Equity is marked to market every tick,
+        so sampling here is what makes the line actually move. Caller holds the
+        lock.
+        """
+        if runner is None:
+            return
+        try:
+            equity = runner.portfolio.equity
+        except Exception:  # noqa: BLE001 - never let the chart kill a tick
+            return
+        self._equity_samples.append((time.time(), float(equity)))
+
     def _note(self, message: str) -> None:
         stamp = time.strftime("%H:%M:%S")
         self.state.log_lines.append(f"[{stamp}] {message}")
@@ -275,6 +296,7 @@ class PaperSession:
                     self.state.ticks += 1
                     self.state.last_tick_at = time.time()
                     self.state.last_error = None
+                    self._sample_equity(runner)
             except Exception as exc:  # noqa: BLE001 - a blip must not kill the session
                 log.exception("paper tick failed")
                 with self._lock:
@@ -412,23 +434,8 @@ class PaperSession:
                     "return_pct": (t.pnl / cost) if cost else None,
                 }
             )
-        # Build equity curve from all closed trades. Start at starting_cash,
-        # accumulate PnL chronologically at each settlement. Always include the
-        # starting point and the current equity so the chart has known bounds.
-        import sys; sys.stderr.write("DEBUG portfolio_dict CALLED\n"); sys.stderr.flush()
         now = time.time()
-        curve: list[list[float]] = []
-        sorted_trades = sorted(p.closed, key=lambda t: t.exit_ts)
-        running = p.starting_cash
-        if sorted_trades:
-            for t in sorted_trades:
-                running += t.pnl
-                curve.append([t.exit_ts, running])
-        curve.append([now, p.equity])
-        if len(curve) > 500:
-            step = len(curve) / 500
-            curve = [curve[int(i * step)] for i in range(500)]
-        sys.stderr.write(f"DEBUG curve len={len(curve)}\n"); sys.stderr.flush()
+        curve = self._equity_curve(p, now)
         result = {
             "trades": trades,
             "trades_truncated": max(0, len(p.closed) - MAX_TRADES_IN_STATE),
@@ -444,9 +451,38 @@ class PaperSession:
             "wins": wins,
             "losses": len(p.closed) - wins,
             "equity_curve": curve,
-            "_debug_curve_len": len(curve),
         }
         return result
+
+    MAX_CURVE_POINTS = 400
+
+    def _equity_curve(self, p, now: float) -> list[list[float]]:
+        """[[ts, equity], ...] for the dashboard chart.
+
+        Built from the per-tick equity samples so the line moves continuously
+        rather than only when a trade closes. Falls back to the session start
+        plus a live point when no samples exist yet, so a fresh session draws a
+        real line instead of a single degenerate dot.
+        """
+        samples = list(self._equity_samples)
+        if not samples:
+            started = self.state.started_at or now
+            samples = [(started, p.starting_cash)]
+
+        # Always keep the newest point. The old downsample took indices
+        # int(i * len/N) for i < N, whose largest index is short of the end, so
+        # the most recent equity value was the one guaranteed to be dropped.
+        cap = self.MAX_CURVE_POINTS
+        if len(samples) > cap:
+            step = len(samples) / (cap - 1)
+            picked = [samples[int(i * step)] for i in range(cap - 1)]
+            picked.append(samples[-1])
+            samples = picked
+
+        curve = [[ts, eq] for ts, eq in samples]
+        if curve[-1][0] < now - 1.0:
+            curve.append([now, p.equity])
+        return curve
 
     def recorder_dict(self) -> dict[str, Any]:
         data_dir = Path(self.cfg.data_dir)

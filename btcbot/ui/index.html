@@ -126,14 +126,44 @@
   }
   .chart-wrap {
     background: var(--panel); border: 1px solid var(--line);
-    border-radius: 10px; padding: 12px 14px;
+    border-radius: 10px; padding: 12px 14px 8px;
+  }
+  .chart-head {
+    display: flex; align-items: baseline; gap: 12px; margin: 0 0 4px;
   }
   .chart-wrap h2 {
     font-size: 11px; text-transform: uppercase; letter-spacing: .08em;
-    color: var(--dim); margin: 0 0 10px; font-weight: 600;
+    color: var(--dim); margin: 0; font-weight: 600;
   }
-  .chart-wrap canvas {
-    display: block; width: 100%; height: 180px;
+  /* Proportional figures on the headline value; tabular is for aligned columns. */
+  .chart-val { font-size: 15px; font-weight: 650; font-variant-numeric: normal; }
+  .chart-val.up { color: var(--up); }
+  .chart-val.down { color: var(--down); }
+  .chart-range { margin-left: auto; font-size: 11px; color: var(--dim); }
+  /* The container has to include the x-axis band, or the card grows a nested
+     scrollbar and clips the time labels. */
+  .chart-plot { position: relative; height: 196px; }
+  .chart-plot canvas {
+    display: block; width: 100%; height: 196px;
+    /* Hold the previous frame during a refetch instead of flashing. */
+    transition: opacity .15s ease;
+  }
+  .chart-plot canvas:focus-visible {
+    outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px;
+  }
+  .chart-tip {
+    position: absolute; pointer-events: none; opacity: 0;
+    transition: opacity .1s ease;
+    background: var(--bg); border: 1px solid var(--line); border-radius: 6px;
+    padding: 5px 8px; font-size: 11px; line-height: 1.45; white-space: nowrap;
+    box-shadow: 0 4px 14px rgba(0,0,0,.35); z-index: 5;
+  }
+  .chart-tip.on { opacity: 1; }
+  .chart-tip b { font-variant-numeric: tabular-nums; }
+  .chart-tip .t { color: var(--dim); }
+  .chart-empty {
+    position: absolute; inset: 0; display: flex; align-items: center;
+    justify-content: center; color: var(--dim); font-size: 12px;
   }
 </style>
 </head>
@@ -189,8 +219,17 @@
   </div>
 
   <div class="chart-wrap">
-    <h2>Equity over time</h2>
-    <canvas id="equity-chart" height="180"></canvas>
+    <div class="chart-head">
+      <h2>Equity</h2>
+      <span class="chart-val" id="chart-val">-</span>
+      <span class="chart-range" id="chart-range"></span>
+    </div>
+    <div class="chart-plot">
+      <canvas id="equity-chart" tabindex="0" role="img"
+              aria-label="Account equity over time. Values are also listed in the trade history table below."></canvas>
+      <div class="chart-tip" id="chart-tip"></div>
+      <div class="chart-empty" id="chart-empty">no session yet — press Start to plot equity</div>
+    </div>
   </div>
 
   <div class="card">
@@ -576,106 +615,331 @@ function renderMarkets(rows) {
   }).join(""));
 }
 
+// ---- equity chart -------------------------------------------------------
+// Single series, so no legend: the card title names it. Grid and axes are
+// recessive hairlines; the only saturated ink is the 2px line, its wash, and
+// the endpoint dot. Hover gives a crosshair and a tooltip, but every value is
+// also on the page (the equity/P&L readouts and the trade table), so the
+// tooltip enhances rather than gates.
+
+const chart = {
+  curve: [],        // [[ts, equity], ...]
+  start: 0,         // starting cash, the break-even threshold
+  px: [],           // screen coords, for nearest-point hover
+  geom: null,
+  hover: null,      // index of the hovered point
+  w: 0, h: 0, dpr: 0,
+};
+
+const CHART_H = 196;
+
+function chartColor(name, fallback) {
+  const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  return v || fallback;
+}
+
+// "Nice" axis steps: 1/2/5 x 10^n, so ticks land on readable numbers.
+function niceStep(span, targetTicks) {
+  const raw = span / Math.max(1, targetTicks);
+  const mag = Math.pow(10, Math.floor(Math.log10(raw || 1)));
+  const norm = raw / mag;
+  const step = norm <= 1 ? 1 : norm <= 2 ? 2 : norm <= 5 ? 5 : 10;
+  return step * mag;
+}
+
+function fmtClock(ts) {
+  const d = new Date(ts * 1000);
+  return String(d.getHours()).padStart(2, "0") + ":" +
+         String(d.getMinutes()).padStart(2, "0");
+}
+
+function fmtMoney(v) {
+  return "$" + v.toLocaleString(undefined, {
+    minimumFractionDigits: 2, maximumFractionDigits: 2,
+  });
+}
+
+function fmtElapsed(secs) {
+  if (!isFinite(secs) || secs < 0) return "";
+  const m = Math.floor(secs / 60), h = Math.floor(m / 60);
+  if (h > 0) return h + "h " + (m % 60) + "m";
+  if (m > 0) return m + "m";
+  return Math.floor(secs) + "s";
+}
+
 function drawEquityCurve(curve, startingCash) {
   const canvas = $("equity-chart");
   if (!canvas) return;
-  const parent = canvas.parentElement;
-  const pw = parent ? parent.clientWidth - 0 : 800;
-  const w = Math.max(pw - 28, 200);
+
+  const hasData = Array.isArray(curve) && curve.length > 0;
+  setText($("chart-empty"), hasData ? "" : "no session yet — press Start to plot equity");
+  $("chart-empty").style.display = hasData ? "none" : "flex";
+  if (!hasData) {
+    const ctx0 = canvas.getContext("2d");
+    ctx0.clearRect(0, 0, canvas.width, canvas.height);
+    chart.curve = []; chart.px = []; chart.geom = null;
+    setText($("chart-val"), "-");
+    setCls($("chart-val"), "chart-val");
+    setText($("chart-range"), "");
+    return;
+  }
+
+  chart.curve = curve;
+  chart.start = startingCash;
+
+  // Resize only when the size actually changed. Assigning canvas.width wipes
+  // the bitmap AND resets the transform, so doing it every poll both throws
+  // away the previous frame (visible flicker) and reallocates for nothing.
+  const cssW = Math.max(220, Math.floor(canvas.clientWidth || 600));
   const dpr = window.devicePixelRatio || 1;
-  canvas.width = w * dpr;
-  canvas.height = 180 * dpr;
-  canvas.style.width = w + "px";
-  canvas.style.height = "180px";
   const ctx = canvas.getContext("2d");
-  ctx.scale(dpr, dpr);
+  if (chart.w !== cssW || chart.h !== CHART_H || chart.dpr !== dpr) {
+    canvas.width = Math.floor(cssW * dpr);
+    canvas.height = Math.floor(CHART_H * dpr);
+    chart.w = cssW; chart.h = CHART_H; chart.dpr = dpr;
+  }
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
-  // Resolve CSS variable colors once (canvas can't use var() directly)
-  const cs = getComputedStyle(document.documentElement);
-  const c = (v) => cs.getPropertyValue(v).trim() || (v === "--line" ? "#262b36" : v === "--dim" ? "#939bab" : v === "--up" ? "#3fb950" : v === "--down" ? "#f85149" : "#e6e9ef");
+  const cLine = chartColor("--line", "#262b36");
+  const cDim = chartColor("--dim", "#939bab");
+  const cUp = chartColor("--up", "#3fb950");
+  const cDown = chartColor("--down", "#f85149");
+  const cPanel = chartColor("--panel", "#171a21");
 
-  const pad = { top: 12, bottom: 22, left: 50, right: 12 };
-  const cw = w - pad.left - pad.right;
-  const ch = 180 - pad.top - pad.bottom;
+  const pad = { top: 10, right: 12, bottom: 24, left: 58 };
+  const cw = cssW - pad.left - pad.right;
+  const ch = CHART_H - pad.top - pad.bottom;
 
-  const prices = curve.map((pt) => pt[1]);
-  const times = curve.map((pt) => pt[0]);
-  const minP = Math.min(...prices, startingCash);
-  const maxP = Math.max(...prices, startingCash);
-  const range = maxP - minP || 1;
+  const vals = curve.map((p) => p[1]);
+  const times = curve.map((p) => p[0]);
+  const last = vals[vals.length - 1];
+
+  // Include the break-even line in the range so it is always visible, then pad.
+  let lo = Math.min(...vals, startingCash);
+  let hi = Math.max(...vals, startingCash);
+  if (hi - lo < 1e-9) {
+    // Flat curve (a fresh session, or no marks yet). Without this the old code
+    // divided by a fallback range of 1 and pinned the line to the very bottom.
+    const bump = Math.max(0.5, Math.abs(hi) * 0.002);
+    lo -= bump; hi += bump;
+  } else {
+    const padY = (hi - lo) * 0.12;
+    lo -= padY; hi += padY;
+  }
+  const span = hi - lo;
+
   const t0 = times[0];
   const t1 = times[times.length - 1];
-  const tRange = t1 - t0 || 1;
+  const tSpan = (t1 - t0) || 1;
+  const X = (t) => pad.left + ((t - t0) / tSpan) * cw;
+  const Y = (v) => pad.top + ch - ((v - lo) / span) * ch;
 
-  const x = (t) => pad.left + ((t - t0) / tRange) * cw;
-  const y = (v) => pad.top + ch - ((v - minP) / range) * ch;
+  ctx.clearRect(0, 0, cssW, CHART_H);
 
-  ctx.clearRect(0, 0, w, 180);
-
-  // grid lines (horizontal, 4 ticks)
-  ctx.strokeStyle = c("--line");
-  ctx.lineWidth = 0.5;
-  for (let i = 0; i <= 4; i++) {
-    const gy = pad.top + (ch / 4) * i;
+  // --- y grid: solid hairlines on nice values -----------------------------
+  const step = niceStep(span, 4);
+  const first = Math.ceil(lo / step) * step;
+  ctx.font = "10px ui-sans-serif, system-ui, sans-serif";
+  ctx.textAlign = "right";
+  ctx.textBaseline = "middle";
+  ctx.lineWidth = 1;
+  for (let v = first; v <= hi + 1e-9; v += step) {
+    const gy = Math.round(Y(v)) + 0.5;   // crisp hairline
+    ctx.strokeStyle = cLine;
     ctx.beginPath();
     ctx.moveTo(pad.left, gy);
     ctx.lineTo(pad.left + cw, gy);
     ctx.stroke();
-    const val = maxP - (range / 4) * i;
-    ctx.fillStyle = c("--dim");
-    ctx.font = "10px ui-sans-serif, system-ui, sans-serif";
-    ctx.textAlign = "right";
-    ctx.fillText("$" + val.toFixed(2), pad.left - 6, gy + 3);
+    ctx.fillStyle = cDim;
+    ctx.fillText(fmtMoney(v), pad.left - 8, gy);
   }
 
-  // baseline at starting cash
-  if (startingCash > minP && startingCash < maxP) {
-    ctx.strokeStyle = c("--dim");
-    ctx.lineWidth = 0.5;
-    ctx.setLineDash([3, 3]);
+  // --- break-even threshold ----------------------------------------------
+  // Dashed on purpose: this is a threshold, not a gridline.
+  if (startingCash > lo && startingCash < hi) {
+    ctx.save();
+    ctx.strokeStyle = cDim;
+    ctx.globalAlpha = 0.55;
+    ctx.setLineDash([4, 4]);
     ctx.beginPath();
-    ctx.moveTo(pad.left, y(startingCash));
-    ctx.lineTo(pad.left + cw, y(startingCash));
+    const by = Math.round(Y(startingCash)) + 0.5;
+    ctx.moveTo(pad.left, by);
+    ctx.lineTo(pad.left + cw, by);
     ctx.stroke();
-    ctx.setLineDash([]);
+    ctx.restore();
   }
 
-  // shade area under curve
+  const above = last >= startingCash;
+  const accent = above ? cUp : cDown;
+
+  // --- area wash ---------------------------------------------------------
+  const grad = ctx.createLinearGradient(0, pad.top, 0, pad.top + ch);
+  grad.addColorStop(0, accent + "3a");
+  grad.addColorStop(1, accent + "05");
   ctx.beginPath();
-  ctx.moveTo(x(times[0]), pad.top + ch);
-  for (let i = 0; i < times.length; i++) {
-    ctx.lineTo(x(times[i]), y(prices[i]));
-  }
-  ctx.lineTo(x(times[times.length - 1]), pad.top + ch);
+  ctx.moveTo(X(times[0]), pad.top + ch);
+  for (let i = 0; i < times.length; i++) ctx.lineTo(X(times[i]), Y(vals[i]));
+  ctx.lineTo(X(t1), pad.top + ch);
   ctx.closePath();
-  const above = prices[prices.length - 1] >= startingCash;
-  const fillC = above ? c("--up") : c("--down");
-  ctx.fillStyle = fillC + "18";
+  ctx.fillStyle = grad;
   ctx.fill();
 
-  // line
+  // --- the line ----------------------------------------------------------
   ctx.beginPath();
-  ctx.moveTo(x(times[0]), y(prices[0]));
-  for (let i = 1; i < times.length; i++) {
-    ctx.lineTo(x(times[i]), y(prices[i]));
-  }
-  ctx.strokeStyle = above ? c("--up") : c("--down");
-  ctx.lineWidth = 1.5;
+  ctx.moveTo(X(times[0]), Y(vals[0]));
+  for (let i = 1; i < times.length; i++) ctx.lineTo(X(times[i]), Y(vals[i]));
+  ctx.strokeStyle = accent;
+  ctx.lineWidth = 2;
+  ctx.lineJoin = "round";
+  ctx.lineCap = "round";
   ctx.stroke();
 
-  // start / end markers
-  ctx.fillStyle = c("--dim");
-  ctx.font = "10px ui-sans-serif, system-ui, sans-serif";
-  ctx.textAlign = "center";
-  const fmtTime = (ts) => {
-    const d = new Date(ts * 1000);
-    const h = String(d.getHours()).padStart(2, "0");
-    const m = String(d.getMinutes()).padStart(2, "0");
-    return h + ":" + m;
-  };
-  ctx.fillText(fmtTime(t0), pad.left, 180 - 4);
-  ctx.fillText(fmtTime(t1), pad.left + cw, 180 - 4);
+  // --- endpoint marker, with a 2px surface ring --------------------------
+  const ex = X(t1), ey = Y(last);
+  ctx.beginPath();
+  ctx.arc(ex, ey, 5.5, 0, Math.PI * 2);
+  ctx.fillStyle = cPanel;
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(ex, ey, 3.5, 0, Math.PI * 2);
+  ctx.fillStyle = accent;
+  ctx.fill();
+
+  // --- x axis: start, middle, end ---------------------------------------
+  ctx.fillStyle = cDim;
+  ctx.textBaseline = "alphabetic";
+  const ty = CHART_H - 7;
+  ctx.textAlign = "left";
+  ctx.fillText(fmtClock(t0), pad.left, ty);
+  ctx.textAlign = "right";
+  ctx.fillText(fmtClock(t1), pad.left + cw, ty);
+  if (tSpan > 120) {
+    ctx.textAlign = "center";
+    const mid = t0 + tSpan / 2;
+    ctx.fillText(fmtClock(mid), X(mid), ty);
+  }
+
+  // cache screen coords for hover
+  chart.px = times.map((t, i) => [X(t), Y(vals[i])]);
+  chart.geom = { pad, cw, ch, X, Y, accent, cPanel, lo, hi };
+
+  // headline readout
+  const pnl = last - startingCash;
+  setText($("chart-val"), fmtMoney(last) +
+    "  " + (pnl >= 0 ? "+" : "−") + fmtMoney(Math.abs(pnl)).slice(1));
+  setCls($("chart-val"), "chart-val " + (above ? "up" : "down"));
+  setText($("chart-range"), fmtElapsed(t1 - t0) + " · " + curve.length + " pts");
+
+  if (chart.hover != null) drawHover(chart.hover);
 }
+
+// --- hover / crosshair ---------------------------------------------------
+
+function drawHover(idx) {
+  const canvas = $("equity-chart");
+  const tip = $("chart-tip");
+  if (!canvas || !chart.geom || !chart.px.length) return;
+  if (idx == null || idx < 0 || idx >= chart.px.length) return;
+
+  // Redraw the base chart so the previous crosshair is cleared, then overlay.
+  const keep = chart.hover;
+  chart.hover = null;
+  drawEquityCurve(chart.curve, chart.start);
+  chart.hover = keep;
+
+  const ctx = canvas.getContext("2d");
+  const { pad, ch, accent, cPanel } = chart.geom;
+  const [px, py] = chart.px[idx];
+
+  ctx.save();
+  ctx.strokeStyle = chartColor("--dim", "#939bab");
+  ctx.globalAlpha = 0.45;
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(Math.round(px) + 0.5, pad.top);
+  ctx.lineTo(Math.round(px) + 0.5, pad.top + ch);
+  ctx.stroke();
+  ctx.restore();
+
+  ctx.beginPath();
+  ctx.arc(px, py, 6, 0, Math.PI * 2);
+  ctx.fillStyle = cPanel;
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(px, py, 3.5, 0, Math.PI * 2);
+  ctx.fillStyle = accent;
+  ctx.fill();
+
+  const [ts, val] = chart.curve[idx];
+  const pnl = val - chart.start;
+  const sign = pnl >= 0 ? "+" : "−";
+  tip.innerHTML = '<span class="t">' + fmtClock(ts) + '</span>  <b>' +
+    fmtMoney(val) + '</b>  <span style="color:' +
+    (pnl >= 0 ? 'var(--up)' : 'var(--down)') + '">' +
+    sign + fmtMoney(Math.abs(pnl)).slice(1) + '</span>';
+  tip.classList.add("on");
+
+  // Keep the tooltip inside the card.
+  const box = tip.getBoundingClientRect();
+  let left = px + 12;
+  if (left + box.width > chart.w) left = px - box.width - 12;
+  tip.style.left = Math.max(0, left) + "px";
+  tip.style.top = Math.max(0, Math.min(py - box.height - 10, CHART_H - box.height)) + "px";
+}
+
+function clearHover() {
+  chart.hover = null;
+  const tip = $("chart-tip");
+  if (tip) tip.classList.remove("on");
+  if (chart.curve.length) drawEquityCurve(chart.curve, chart.start);
+}
+
+function nearestIndex(clientX) {
+  const canvas = $("equity-chart");
+  if (!canvas || !chart.px.length) return null;
+  const rect = canvas.getBoundingClientRect();
+  const x = clientX - rect.left;
+  let best = 0, bestD = Infinity;
+  for (let i = 0; i < chart.px.length; i++) {
+    const d = Math.abs(chart.px[i][0] - x);
+    if (d < bestD) { bestD = d; best = i; }
+  }
+  return best;
+}
+
+(function bindChart() {
+  const canvas = $("equity-chart");
+  if (!canvas) return;
+  // Nearest-point on x, so there is no pinpoint target to land on.
+  canvas.addEventListener("pointermove", (e) => {
+    const i = nearestIndex(e.clientX);
+    if (i != null && i !== chart.hover) { chart.hover = i; drawHover(i); }
+  });
+  canvas.addEventListener("pointerleave", clearHover);
+  // Keyboard parity with hover.
+  canvas.addEventListener("keydown", (e) => {
+    if (!chart.px.length) return;
+    let i = chart.hover == null ? chart.px.length - 1 : chart.hover;
+    if (e.key === "ArrowLeft") i = Math.max(0, i - 1);
+    else if (e.key === "ArrowRight") i = Math.min(chart.px.length - 1, i + 1);
+    else if (e.key === "Home") i = 0;
+    else if (e.key === "End") i = chart.px.length - 1;
+    else if (e.key === "Escape") { clearHover(); canvas.blur(); return; }
+    else return;
+    e.preventDefault();
+    chart.hover = i;
+    drawHover(i);
+  });
+  canvas.addEventListener("blur", clearHover);
+  // Redraw on resize so the plot tracks the card width.
+  let raf = 0;
+  window.addEventListener("resize", () => {
+    cancelAnimationFrame(raf);
+    raf = requestAnimationFrame(() => {
+      if (chart.curve.length) drawEquityCurve(chart.curve, chart.start);
+    });
+  });
+})();
 
 async function refresh() {
   let s;
@@ -731,9 +995,13 @@ async function refresh() {
 
   renderLive(s);
 
-  if (p.active && Array.isArray(p.equity_curve) && p.equity_curve.length >= 1) {
-    drawEquityCurve(p.equity_curve, p.starting_cash);
-  }
+  // Always call it: with no session it draws the empty state rather than
+  // leaving a blank canvas with no explanation, and on stop it stops updating
+  // instead of freezing mid-render.
+  drawEquityCurve(
+    p.active && Array.isArray(p.equity_curve) ? p.equity_curve : null,
+    p.starting_cash
+  );
 
   const r = s.recorder || {};
   setText($("snaps"), num(r.snapshots));
