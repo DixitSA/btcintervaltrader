@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 import time
 from pathlib import Path
@@ -440,7 +441,38 @@ def cmd_serve(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 1
+    if args.data_dir:
+        cfg.data_dir = args.data_dir
+    elif _recorder_is_writing(cfg.data_dir):
+        # A paper session and the shadow replay both write into data_dir. With
+        # the recorder appending to the same files that is two writers, which is
+        # what shredded 71% of a real shadow ledger. Warn rather than block:
+        # reading a live dataset in the panel is legitimate and common.
+        print(
+            f"NOTE: '{cfg.data_dir}' is being written to right now, probably by "
+            "the recorder.\n"
+            "  Starting a paper session or a shadow replay from this panel would "
+            "make a second\n"
+            "  writer on the same files. Pass --data-dir DIR to keep them apart "
+            "if you intend to trade.\n",
+            file=sys.stderr,
+        )
     return serve(cfg, host=args.host, port=args.port)
+
+
+def _recorder_is_writing(data_dir: str, within_seconds: float = 30.0) -> bool:
+    """True if something appended to this data dir very recently."""
+    directory = Path(data_dir)
+    if not directory.exists():
+        return False
+    newest = 0.0
+    for pattern in ("snapshots-*.jsonl", "shadow.jsonl"):
+        for f in directory.glob(pattern):
+            try:
+                newest = max(newest, f.stat().st_mtime)
+            except OSError:
+                continue
+    return newest > 0 and (time.time() - newest) < within_seconds
 
 
 def cmd_live(args: argparse.Namespace) -> int:
@@ -475,8 +507,15 @@ def cmd_shadow_replay(args: argparse.Namespace) -> int:
     ]
     output = Path(args.output or Path(data_dir) / cfg.shadow.ledger_file)
 
+    # Build into a staging file and swap. Opening the ledger on the destination
+    # would load it and dedup against it, so a replay "in place" skips every
+    # record already present and cannot repair a damaged file -- and writing the
+    # live ledger directly is a second writer whenever the recorder is running.
+    staging = output.with_suffix(output.suffix + ".rebuilding")
+    staging.unlink(missing_ok=True)
+
     ledger = ShadowLedger(
-        ledger_path=output,
+        ledger_path=staging,
         producer="replay",
         fee_model=fee_model,
         rung_defs=rung_defs,
@@ -514,8 +553,25 @@ def cmd_shadow_replay(args: argparse.Namespace) -> int:
                 ledger.append_settled(s)
 
     records = ledger.load_records()
-    unsettled = sum(1 for r in records if r.won is None)
-    print(f"shadow replay: {len(records)} records ({unsettled} unsettled) -> {output}")
+    unsettled = sum(1 for r in records if r.settled_ts is None)
+    voided = sum(1 for r in records if r.settled_ts is not None and r.won is None)
+    settled = len(records) - unsettled - voided
+
+    if output.exists():
+        backup = output.with_suffix(output.suffix + ".prev")
+        os.replace(output, backup)
+        print(f"  previous ledger kept at {backup}")
+    os.replace(staging, output)
+
+    print(
+        f"shadow replay: {len(records)} records "
+        f"({settled} settled, {voided} void, {unsettled} pending) -> {output}"
+    )
+    if voided:
+        print(
+            f"  {voided} records could not be scored: the window was not recorded to\n"
+            "  its close, or spot sat too near the strike to call. See infer_outcome."
+        )
     if ledger.skips:
         detail = ", ".join(f"{k}={v}" for k, v in sorted(ledger.skips.items()))
         print(f"  skipped entries: {detail}")
@@ -798,6 +854,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_srv.add_argument("--host", default="127.0.0.1")
     p_srv.add_argument("--port", type=int, default=8787)
+    p_srv.add_argument(
+        "--data-dir",
+        default=None,
+        help="read/write snapshots and the shadow ledger here instead of the "
+        "configured data_dir. Use this when the recorder is running, so a paper "
+        "session does not write the same files.",
+    )
     p_srv.set_defaults(func=cmd_serve)
 
     p_cal = sub.add_parser("calibrate", help="inspect calibration curve from past trade outcomes")

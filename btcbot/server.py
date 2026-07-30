@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 import time
 from collections import deque
@@ -657,12 +658,27 @@ class PaperSession:
         ]
         output = Path(data_dir) / (self.cfg.shadow.ledger_file or "shadow.jsonl")
 
+        # Rebuild into a fresh file, then swap it in. Two reasons:
+        #
+        # 1. A ShadowLedger opened on an existing file loads it and dedups
+        #    against it, so replaying in place would skip every record already
+        #    there and change nothing -- including leaving corrupt lines behind.
+        # 2. Writing the live file directly makes this a second writer whenever
+        #    the recorder is running, which is what corrupted the ledger before.
+        #
+        # The swap is os.replace, which is atomic, so a reader sees either the
+        # old ledger or the new one and never a half-written file.
+        staging = output.with_suffix(output.suffix + ".rebuilding")
+        staging.unlink(missing_ok=True)
+
         ledger = ShadowLedger(
-            ledger_path=output,
+            ledger_path=staging,
             producer="replay",
             fee_model=fee_model,
             rung_defs=rung_defs,
             enabled=True,
+            notional_usd=self.cfg.shadow.notional_usd,
+            directions=self.cfg.shadow.directions,
         )
 
         ordered = sorted(
@@ -696,6 +712,14 @@ class PaperSession:
         # so counting won-is-None would report finished windows as pending.
         unsettled = sum(1 for r in records if r.settled_ts is None)
         voided = sum(1 for r in records if r.settled_ts is not None and r.won is None)
+
+        # Keep the ledger we are replacing, once. Rebuilds are cheap to redo;
+        # discarding the only copy of live-recorded fills is not.
+        if output.exists():
+            backup = output.with_suffix(output.suffix + ".prev")
+            os.replace(output, backup)
+        os.replace(staging, output)
+
         return {
             "ok": True,
             "records": len(records),
@@ -703,6 +727,7 @@ class PaperSession:
             "voided": voided,
             "windows": len(windows),
             "file": str(output),
+            "bad_lines_in_rebuild": ledger.load_errors,
         }
 
     def state_dict(self) -> dict[str, Any]:
