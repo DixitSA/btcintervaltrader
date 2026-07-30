@@ -312,8 +312,8 @@ class ShadowLedger:
             rec = self._records.get(key)
             if rec is None:
                 continue
-            if rec.won is not None:
-                continue  # already settled
+            if rec.settled_ts is not None:
+                continue  # already resolved, including as a void
 
             won = (winning_side == rec.side) if winning_side is not None else None
 
@@ -420,10 +420,17 @@ class ShadowLedger:
         return records
 
     def unsettled_slugs(self) -> set[str]:
-        """Return slugs with at least one unsettled (won is None) record."""
+        """Slugs with at least one record that has not been resolved yet.
+
+        Keyed on settled_ts, not on `won`. A window we could not determine the
+        winner of resolves as a VOID -- settled_ts set, won left None -- and
+        that is terminal. Treating won-is-None as "still open" made every such
+        window come back on every tick, be re-settled, and be re-appended to the
+        ledger file forever, which slowed the record loop down as they piled up.
+        """
         slugs: set[str] = set()
         for key, rec in self._records.items():
-            if rec.won is None:
+            if rec.settled_ts is None:
                 slug = key.split("::")[0]
                 if slug:
                     slugs.add(slug)
