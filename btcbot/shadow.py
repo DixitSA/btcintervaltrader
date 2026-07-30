@@ -156,6 +156,9 @@ class ShadowLedger:
         # Skips are counted, not silent: dropping entries without a record of
         # why measures a rosier market than the one that exists.
         self.skips: dict[str, int] = {}
+        # Set by load_records(): unreadable lines, and lines seen.
+        self.load_errors = 0
+        self.load_lines = 0
 
         if producer == "history" and self.path:
             self._assert_history_path()
@@ -360,64 +363,84 @@ class ShadowLedger:
         if key in self._dedup:
             return
 
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        with open(self.path, "a") as f:
-            f.write(json.dumps(asdict(record), default=str) + "\n")
+        self._write_line(json.dumps(asdict(record), default=str))
         self._records[key] = record
         self._dedup.add(key)
 
     def append_settled(self, record: ShadowRecord) -> None:
-        """Overwrite an existing record with settlement fields filled in."""
+        """Record the settled form of an entry by APPENDING it.
+
+        This used to read the whole file, substitute the matching line, and write
+        the whole file back. That is unsafe in three ways at once, and all three
+        bit: the truncate-then-write leaves a window where the file on disk is
+        partial; two processes doing read-modify-write on one file interleave into
+        each other's records; and it is O(file) per settlement, which on an 856KB
+        ledger made the recorder's per-tick settlement pass expensive.
+
+        The result was a ledger 71% of whose lines were unparseable fragments
+        like `"spread{"schema_ve{"schema_version"`, silently dropped on load.
+
+        This is an append-only ledger, and both readers already resolve a
+        repeated dedup key by keeping the LAST occurrence, so appending the
+        settled form supersedes the entry form without touching existing bytes.
+        """
         if not self.enabled or self.path is None:
-            return
-        if not self.path.exists():
             return
 
         key = _dedup_key(record.slug, record.rung, record.direction)
-        lines = self.path.read_text().splitlines()
-        rewritten = False
-        out_lines = []
-        for line in lines:
-            stripped = line.strip()
-            if not stripped:
-                continue
-            try:
-                d = json.loads(stripped)
-                existing_key = _dedup_key(
-                    d.get("slug", ""),
-                    d.get("rung", -1),
-                    d.get("direction", ""),
-                )
-                if existing_key == key:
-                    out_lines.append(json.dumps(asdict(record), default=str))
-                    rewritten = True
-                else:
-                    out_lines.append(stripped)
-            except (json.JSONDecodeError, TypeError, ValueError):
-                out_lines.append(stripped)
-
-        if rewritten:
-            self.path.write_text("\n".join(out_lines) + "\n")
-
+        self._write_line(json.dumps(asdict(record), default=str))
         self._records[key] = record
         self._dedup.add(key)
 
+    def _write_line(self, line: str) -> None:
+        """Append one line in a single write, creating the file if needed.
+
+        One write of one complete line is the most an append-only JSONL file can
+        do to stay readable when something else is writing too. It is not a
+        substitute for not having two writers -- see the module docstring.
+        """
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with open(self.path, "a", encoding="utf-8", newline="\n") as f:
+            f.write(line + "\n")
+
     def load_records(self) -> list[ShadowRecord]:
-        """Load all records from the ledger file (reads fresh from disk)."""
-        records: list[ShadowRecord] = []
+        """Load records fresh from disk, one per (slug, rung, direction).
+
+        A dedup key can appear more than once -- the entry line and then the
+        settled line that supersedes it -- so the LAST occurrence wins, matching
+        _load_existing. Returning every line instead would count a settled record
+        twice and double its P&L in the ranking.
+
+        Unparseable lines are counted in `self.load_errors` rather than only
+        logged. 71% of a real ledger was once fragments from an unsafe rewrite,
+        and a warning nobody reads is how that stayed invisible.
+        """
+        by_key: dict[str, ShadowRecord] = {}
+        self.load_errors = 0
+        self.load_lines = 0
         if not self.path or not self.path.exists():
-            return records
-        with open(self.path) as f:
+            return []
+        with open(self.path, encoding="utf-8", errors="replace") as f:
             for line in f:
                 line = line.strip()
                 if not line:
                     continue
+                self.load_lines += 1
                 try:
-                    d = json.loads(line)
-                    records.append(ShadowRecord(**d))
+                    rec = ShadowRecord(**json.loads(line))
                 except (json.JSONDecodeError, TypeError, ValueError) as exc:
-                    log.warning("skipping bad shadow record: %s", exc)
-        return records
+                    self.load_errors += 1
+                    if self.load_errors <= 3:
+                        log.warning("skipping bad shadow record: %s", exc)
+                    continue
+                by_key[_dedup_key(rec.slug, rec.rung, rec.direction)] = rec
+        if self.load_errors:
+            log.warning(
+                "shadow ledger %s: %d of %d lines unreadable (%.0f%%)",
+                self.path, self.load_errors, self.load_lines,
+                100.0 * self.load_errors / max(1, self.load_lines),
+            )
+        return list(by_key.values())
 
     def unsettled_slugs(self) -> set[str]:
         """Slugs with at least one record that has not been resolved yet.
