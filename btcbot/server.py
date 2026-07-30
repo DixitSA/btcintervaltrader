@@ -415,6 +415,10 @@ class PaperSession:
             trades.append(
                 {
                     "slug": t.slug,
+                    # Same resolution the open-windows table uses, so both
+                    # tables label the asset identically instead of leaving the
+                    # trade table to be read off the slug.
+                    "family": self.cfg.markets.family_for(t.slug) or "btc",
                     "side": t.side,
                     "shares": t.shares,
                     "entry_price": t.entry_price,
@@ -676,11 +680,15 @@ class PaperSession:
                     ledger.append_settled(s)
 
         records = ledger.load_records()
-        unsettled = sum(1 for r in records if r.won is None)
+        # Keyed on settled_ts: a void is resolved (settled_ts set, won None),
+        # so counting won-is-None would report finished windows as pending.
+        unsettled = sum(1 for r in records if r.settled_ts is None)
+        voided = sum(1 for r in records if r.settled_ts is not None and r.won is None)
         return {
             "ok": True,
             "records": len(records),
             "unsettled": unsettled,
+            "voided": voided,
             "windows": len(windows),
             "file": str(output),
         }

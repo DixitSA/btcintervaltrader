@@ -124,6 +124,9 @@
     s = Math.round(s);
     return s < 60 ? s + "s" : Math.floor(s / 60) + "m" + String(s % 60).padStart(2, "0") + "s";
   };
+  // One asset label for every row in this overlay -- markets, shadow rungs and
+  // trades -- so the same window is never called two different things.
+  const assetLabel = (row) => ((row && row.family) || "BTC").toUpperCase();
 
   // Trade history, newest first. The overlay is narrow, so each trade gets two
   // lines rather than a wide table: the verdict and money on top, the mechanics
@@ -171,7 +174,7 @@
         <div class="bb-trade-bot">
           ${clockTime(t.exit_ts)} · held ${heldStr(t.held_seconds)} · ${reason}
         </div>
-        <div class="bb-trade-slug">${t.slug}</div>
+        <div class="bb-trade-slug">${assetLabel(t)} · ${t.slug}</div>
       </div>`;
     }
     html += `</div>`;
@@ -348,7 +351,7 @@
     if (rows && rows.length) {
       const filteredRows = shadowFamily === "All"
         ? rows
-        : rows.filter((r) => (r.family || "BTC").toUpperCase() === shadowFamily);
+        : rows.filter((r) => assetLabel(r) === shadowFamily);
       if (!filteredRows.length) {
         setHTML(box, "shadow", `<div class="bb-dim" style="padding:4px 0">No data for ${shadowFamily}</div>`);
         return;
@@ -401,7 +404,7 @@
         const pnlCls = dollars > 0 ? "bb-up" : dollars < 0 ? "bb-down" : "";
         const lcbCls = r.lcb95 > 0 ? "bb-up" : r.lcb95 < 0 ? "bb-down" : "";
         const pairCls = r.paired_diff_r0 > 0 ? "bb-up" : r.paired_diff_r0 < 0 ? "bb-down" : "";
-        const recFam = (r.family || "BTC").toUpperCase();
+        const recFam = assetLabel(r);
         html += `<tr>
           <td class="bb-dim"><b>${recFam}</b></td>
           <td class="bb-dim">${RUNG_TABLE[r.rung] || r.rung}</td>
@@ -489,8 +492,9 @@
       return;
     }
 
-    const fam = (m) => (m.family || "BTC").toUpperCase();
-    const filtered = selectedFamily === "All" ? rows : rows.filter((m) => fam(m) === selectedFamily);
+    const filtered = selectedFamily === "All"
+      ? rows
+      : rows.filter((m) => assetLabel(m) === selectedFamily);
 
     if (!filtered.length) {
       setHTML(box, "markets", `<div class="bb-msg" style="display:block">No ${selectedFamily} windows open</div>`);
@@ -517,7 +521,7 @@
             : "";
         return `
         <div class="bb-mkt">
-          <div class="bb-slug"><span class="bb-asset">${fam(m)}</span> ${slug}<span class="bb-left">${mmss(m.seconds_left)}</span></div>
+          <div class="bb-slug"><span class="bb-asset">${assetLabel(m)}</span> ${slug}<span class="bb-left">${mmss(m.seconds_left)}</span></div>
           ${spread ? `<div class="bb-spread">bid/ask${spread}</div>` : ""}
           <div class="bb-grid">
             <span>Market odds</span><b>${pct(m.market_p_up)}</b>

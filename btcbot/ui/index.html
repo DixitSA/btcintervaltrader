@@ -237,11 +237,11 @@
     <div class="scroll">
       <table>
         <thead><tr>
-          <th>result</th><th>closed</th><th>market</th><th>side</th><th>shares</th>
+          <th>result</th><th>closed</th><th>market</th><th>asset</th><th>side</th><th>shares</th>
           <th title="price paid per contract at open">buy @</th><th title="price received per contract at close">sell @</th><th>stake</th><th>P&amp;L</th><th>return</th>
           <th>fees</th><th>held</th><th>exit reason</th>
         </tr></thead>
-        <tbody id="trades"><tr><td colspan="13" class="dim">no closed trades yet</td></tr></tbody>
+        <tbody id="trades"><tr><td colspan="14" class="dim">no closed trades yet</td></tr></tbody>
       </table>
     </div>
     <div class="caveat" id="trades-note"></div>
@@ -527,10 +527,15 @@ const heldStr = (s) => {
   return s < 60 ? s + "s" : Math.floor(s / 60) + "m" + String(s % 60).padStart(2, "0") + "s";
 };
 
+// One asset label for every table, so "open windows" and "trade history" name
+// the same thing the same way. Falls back to BTC for rows recorded before the
+// server sent a family.
+const assetLabel = (row) => ((row && row.family) || "BTC").toUpperCase();
+
 function renderTrades(trades, truncated) {
   const tb = $("trades");
   if (!trades || !trades.length) {
-    setHTML(tb, '<tr><td colspan="13" class="dim">no closed trades yet</td></tr>');
+    setHTML(tb, '<tr><td colspan="14" class="dim">no closed trades yet</td></tr>');
     setText($("trade-summary"), "");
     setText($("trades-note"), "");
     return;
@@ -556,6 +561,7 @@ function renderTrades(trades, truncated) {
       <td class="${cls}"><b>${badge}</b></td>
       <td class="dim">${clockTime(t.exit_ts)}</td>
       <td>${t.slug}</td>
+      <td><b>${assetLabel(t)}</b></td>
       <td>${t.side}</td>
       <td class="dim">${t.shares.toFixed(1)}</td>
       <td>${t.entry_price.toFixed(3)}</td>
@@ -580,8 +586,9 @@ function renderMarkets(rows) {
     setHTML(tb, '<tr><td colspan="11" class="dim">no open windows in range</td></tr>');
     return;
   }
-  const family = (m) => (m.family || "BTC").toUpperCase();
-  const filtered = selectedFamily === "All" ? rows : rows.filter((m) => family(m) === selectedFamily);
+  const filtered = selectedFamily === "All"
+    ? rows
+    : rows.filter((m) => assetLabel(m) === selectedFamily);
   if (!filtered.length) {
     setHTML(tb, `<tr><td colspan="11" class="dim">no ${selectedFamily} windows open</td></tr>`);
     return;
@@ -601,7 +608,7 @@ function renderMarkets(rows) {
     }
     return `<tr>
       <td>${name}</td>
-      <td><b>${family(m)}</b></td>
+      <td><b>${assetLabel(m)}</b></td>
       <td>${mmss(m.seconds_left)}</td>
       <td>${m.spot == null ? "-" : num(m.spot)}</td>
       <td>${m.strike == null ? '<span class="warn">none</span>' : num(m.strike)}</td>
