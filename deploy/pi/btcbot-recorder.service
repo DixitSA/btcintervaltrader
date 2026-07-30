@@ -1,0 +1,42 @@
+[Unit]
+Description=btcintervaltrader snapshot recorder
+Documentation=file://%h/btcintervaltrader/deploy/pi/README.md
+# Needs real network, not just an interface being up.
+Wants=network-online.target
+After=network-online.target
+# The Pi has no battery-backed clock. Window timing is clock-dependent -- the
+# recorder needs a spot reading within 30s of a window's close to settle it --
+# so starting before NTP has corrected the clock produces windows that silently
+# cannot be scored.
+After=time-sync.target
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=__REPO__
+ExecStart=__REPO__/.venv/bin/python -m btcbot record --data-dir __DATA_DIR__
+
+# systemd is the supervisor, so scripts/record_forever.py is not used here.
+# Restart on any exit, including clean ones: the recorder exiting at all means
+# it stopped collecting, and a gap in the dataset is the thing we are avoiding.
+Restart=always
+RestartSec=5
+# Do not give up after repeated restarts. A long network outage would otherwise
+# leave the recorder dead until someone noticed.
+StartLimitIntervalSec=0
+
+# Logs go to journald: journalctl -u btcbot-recorder -f
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=btcbot
+
+# Modest hardening. The recorder only needs to read the repo and write its data
+# directory; it places no orders and needs no credentials for public market data.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=__DATA_DIR__
+
+[Install]
+WantedBy=multi-user.target
