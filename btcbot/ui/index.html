@@ -434,12 +434,35 @@ $("shadow-replay").onclick = async () => {
 function renderShadow() {
   setText($("unit-val"), "$" + unitUsd);
   const box = $("shadow-body");
+  const loaded = shadowStatus != null || shadowRows != null;
 
-  setText($("shadow-summary"), shadowStatus && shadowStatus.exists
-    ? `${shadowStatus.records} records · ${shadowStatus.settled} settled · ${shadowStatus.windows} windows`
-    : "no shadow data");
+  let summary;
+  if (shadowStatus && shadowStatus.exists) {
+    const s = shadowStatus;
+    summary = `${s.records} records · ${s.settled} settled`
+      + (s.voided ? ` · ${s.voided} void` : "")
+      + (s.unsettled ? ` · ${s.unsettled} pending` : "")
+      + ` · ${s.windows} windows`;
+  } else if (!loaded) {
+    summary = "loading…";
+  } else {
+    summary = "no shadow data";
+  }
+  // Say the refresh failed rather than pretending the ledger emptied.
+  if (shadowStatus && shadowStatus.bad_lines) {
+    const s = shadowStatus;
+    summary += `  · ⚠ ${s.bad_lines}/${s.total_lines} ledger lines unreadable`;
+  }
+  setText($("shadow-summary"), summary + (shadowStale ? "  · refresh failed, showing last known" : ""));
 
-  if (!shadowRows || !shadowRows.length) {
+  if (!shadowRows) {
+    setHTML(box, loaded
+      ? '<div class="dim">Could not load the shadow report. Showing nothing rather '
+        + 'than guessing; it will retry.</div>'
+      : '<div class="dim">loading…</div>');
+    return;
+  }
+  if (!shadowRows.length) {
     setHTML(box, '<div class="dim">No settled shadow records yet. '
       + 'Run a replay, or let paper trading settle some windows.</div>');
     return;
@@ -504,15 +527,55 @@ function renderShadow() {
   setHTML(box, html);
 }
 
+// A refresh may fail for reasons that say nothing about the ledger: the server
+// restarting, a request overlapping a slow one, a torn read. The old version
+// assigned the fetch result unconditionally, so ANY such blip replaced good data
+// with null and the whole panel blanked to "no shadow data" until the next poll
+// 15s later. That is the ledger "disappearing".
+//
+// Now a failed fetch leaves the last good data in place and only marks it stale.
+// Data is replaced when, and only when, a request actually succeeds.
+let shadowStale = false;
+let shadowInFlight = false;
+
+async function fetchJson(url) {
+  const r = await fetch(url, { cache: "no-store" });
+  if (!r.ok) throw new Error(`${url} -> HTTP ${r.status}`);
+  return r.json();
+}
+
 async function refreshShadow() {
+  // Both endpoints re-read and parse the whole ledger file. Overlapping polls
+  // would queue behind each other and make the timeouts they cause more likely.
+  if (shadowInFlight) return;
+  shadowInFlight = true;
+  let failed = false;
   try {
-    const [st, rep] = await Promise.all([
-      fetch("/api/shadow/status").then((r) => r.json()).catch(() => null),
-      fetch("/api/shadow/report").then((r) => r.json()).catch(() => null),
+    const [st, rep] = await Promise.allSettled([
+      fetchJson("/api/shadow/status"),
+      fetchJson("/api/shadow/report"),
     ]);
-    shadowStatus = st;
-    shadowRows = Array.isArray(rep) ? rep : (rep && rep.rows) || null;
-  } catch (e) {}
+    if (st.status === "fulfilled" && st.value) {
+      shadowStatus = st.value;
+    } else {
+      failed = true;
+    }
+    if (rep.status === "fulfilled" && rep.value) {
+      const rows = Array.isArray(rep.value) ? rep.value : rep.value.rows;
+      // An empty array is a real answer ("nothing settled yet"); undefined is not.
+      if (Array.isArray(rows)) shadowRows = rows;
+      else failed = true;
+    } else {
+      failed = true;
+    }
+  } catch (e) {
+    failed = true;
+  } finally {
+    shadowInFlight = false;
+  }
+  // Only "stale" once we have something worth keeping; before the first success
+  // the panel should still say it is loading.
+  shadowStale = failed && (shadowStatus != null || shadowRows != null);
   renderShadow();
 }
 

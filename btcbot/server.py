@@ -517,14 +517,26 @@ class PaperSession:
             return {"exists": False, "records": 0, "settled": 0, "windows": 0}
         ledger = ShadowLedger(ledger_path=ledger_path, enabled=True)
         records = ledger.load_records()
+        # Three states, not two, and they must add up to `records`: a record has
+        # a verdict, resolved as a void, or is still pending. `settled` stays the
+        # count with an actual verdict, because that is what the sample-size
+        # readout is counting -- a void teaches us nothing.
         settled = [r for r in records if r.won is not None]
+        voided = [r for r in records if r.settled_ts is not None and r.won is None]
+        pending = [r for r in records if r.settled_ts is None]
         windows = len(set(r.slug for r in settled)) if settled else 0
         return {
             "exists": True,
             "records": len(records),
             "settled": len(settled),
+            "voided": len(voided),
+            "unsettled": len(pending),
             "windows": windows,
             "unsettled_slugs": len(ledger.unsettled_slugs()),
+            # Surfaced, not just logged: a ledger silently dropping most of its
+            # lines looks exactly like a ledger with little data in it.
+            "bad_lines": ledger.load_errors,
+            "total_lines": ledger.load_lines,
         }
 
     def shadow_report_dict(self) -> list[dict[str, Any]]:
