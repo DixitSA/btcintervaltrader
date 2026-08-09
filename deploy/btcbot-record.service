@@ -1,0 +1,50 @@
+# Recorder as a systemd service. See QUICKSTART.md "Running on a headless server".
+#
+#   sudo cp deploy/btcbot-record.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now btcbot-record
+#
+# Adjust User= and the three paths if you did not install to
+# /opt/btcintervaltrader owned by a `btcbot` user.
+
+[Unit]
+Description=btcintervaltrader market recorder
+Documentation=https://github.com/DixitSA/btcintervaltrader
+# network-online rather than network: the recorder's first act is an HTTPS call
+# to Kalshi, and starting before DNS is up just burns a restart.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=btcbot
+Group=btcbot
+WorkingDirectory=/opt/btcintervaltrader
+
+# record_forever.py does its own restart-with-backoff and logs every restart to
+# recorder-supervisor.log, so gaps in the dataset stay visible. systemd's
+# Restart= below is the OUTER layer -- it covers reboots and the supervisor
+# itself dying, which the supervisor cannot cover for itself.
+ExecStart=/opt/btcintervaltrader/.venv/bin/python scripts/record_forever.py
+Environment=PYTHONUNBUFFERED=1
+
+Restart=always
+RestartSec=15s
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=btcbot-record
+
+# The recorder needs outbound HTTPS and its own directory. Nothing else.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+# Snapshots land in data/, and the supervisor's restart log in the repo root.
+ReadWritePaths=/opt/btcintervaltrader
+
+[Install]
+WantedBy=multi-user.target

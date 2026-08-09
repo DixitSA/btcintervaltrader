@@ -6,13 +6,14 @@ Works on Windows, macOS and Linux. You need **Python 3.10+** and git.
 
 ## 1. Get the code
 
-The work lives on a branch that isn't merged yet, so clone and check it out:
-
 ```bash
 git clone https://github.com/DixitSA/btcintervaltrader.git
 cd btcintervaltrader
-git checkout claude/btc-prediction-market-bot-q4wjej
 ```
+
+**Running headlessly on a Linux server?** Do steps 1–3 here, then jump to
+[Running on a headless server](#running-on-a-headless-server) — `nohup` in
+step 4 is not what you want on a machine you will disconnect from.
 
 <details>
 <summary>Don't have git? (click)</summary>
@@ -166,6 +167,132 @@ typo alone can move real money.
 
 ---
 
+## Running on a headless server
+
+Ubuntu/Debian. The goal is the multi-day `record` run surviving disconnects,
+crashes and reboots without you watching it.
+
+### Prerequisites
+
+Ubuntu ships Python without `venv`, and the setup script needs it:
+
+```bash
+sudo apt update
+sudo apt install -y python3-venv python3-pip git
+python3 --version          # needs 3.10+
+```
+
+### Check the clock before anything else
+
+This bot reasons about seconds-to-expiry and writes one data file per **UTC**
+day. A server whose clock has drifted produces snapshots timestamped wrongly
+relative to the windows they describe, and nothing downstream will flag it:
+
+```bash
+timedatectl                        # want "System clock synchronized: yes"
+sudo timedatectl set-ntp true      # if it is not
+```
+
+Leave the server on UTC. Don't set a local timezone — the ticker names are ET
+and the data files are UTC, and adding a third timezone helps nobody.
+
+### Check the server can actually reach Kalshi
+
+Do this **before** setting up the service. Run it from the server itself:
+
+```bash
+python -m btcbot verify-venue
+```
+
+Kalshi is a US-regulated venue, and datacenter IP ranges are a plausible thing
+for it to refuse even when your laptop works fine. If this returns 403 or a
+connection failure from the server but works at home, that is the port blocked
+at the first step — find out now, not after you've configured systemd.
+
+### Install
+
+```bash
+sudo useradd --system --create-home --home-dir /opt/btcintervaltrader btcbot
+sudo -u btcbot git clone https://github.com/DixitSA/btcintervaltrader.git /opt/btcintervaltrader
+cd /opt/btcintervaltrader
+sudo -u btcbot python3 scripts/setup.py
+```
+
+### Run the recorder as a service
+
+```bash
+sudo cp deploy/btcbot-record.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now btcbot-record
+```
+
+`enable` is the part that matters — it survives reboots. Then:
+
+```bash
+systemctl status btcbot-record
+journalctl -u btcbot-record -f              # live output
+journalctl -u btcbot-record --since today   # what happened overnight
+```
+
+Use `systemd`, not `nohup`. `nohup` dies with the reboot you will eventually do
+and gives you nothing to check afterwards.
+
+Note the two layers of supervision, which is deliberate rather than redundant:
+`record_forever.py` restarts the recorder with backoff and logs each restart to
+`recorder-supervisor.log`, so **gaps in your dataset stay visible**; systemd
+restarts the supervisor, covering reboots and the supervisor itself dying.
+
+### Watch it accumulate
+
+```bash
+ls -la /opt/btcintervaltrader/data/
+wc -l /opt/btcintervaltrader/data/*.jsonl
+tail -5 /opt/btcintervaltrader/recorder-supervisor.log
+```
+
+The number that actually gates your analysis is **windows**, not snapshots —
+they differ by ~300x, and it is the mistake that sends people into parameter
+tuning on 19 windows:
+
+```bash
+cd /opt/btcintervaltrader && sudo -u btcbot .venv/bin/python -c \
+  "from btcbot.recorder import load_dataset; from btcbot.backtest import group_windows; \
+   print(len(group_windows(load_dataset('data'))), 'windows')"
+```
+
+You want **≥100** before tuning anything. At 4 windows/hour that is a bit over a
+day of clean uptime; budget several days for restarts and gaps.
+
+### Disk
+
+At `poll_seconds: 2.0` the recorder writes roughly **30–60 MB/day** (~750 bytes
+per snapshot, ~43k snapshots/day, more when several windows overlap). Call it
+**1–2 GB/month**. Fine on any VPS, but it grows forever — `data/` is never
+pruned, and a full disk stops the recording silently from your perspective.
+Check occasionally with `df -h`.
+
+### Reaching the web panel
+
+`python -m btcbot serve` binds `127.0.0.1` deliberately. **Do not change that
+to 0.0.0.0 to reach it remotely** — the panel has no authentication and drives a
+trading bot. Tunnel over SSH instead, from your laptop:
+
+```bash
+ssh -L 8787:127.0.0.1:8787 youruser@yourserver
+```
+
+Then open <http://127.0.0.1:8787> locally. The browser extension and native
+messaging host are desktop-only and have no role on a headless server.
+
+### Credentials
+
+`record` and `paper` need **no API key** — Kalshi market data is public. Only
+live trading does. If you do add credentials later, `.env` is gitignored and
+must stay that way; `chmod 600 .env` and keep the RSA private key readable only
+by the `btcbot` user.
+
+---
+
 ## Common problems
 
 | Symptom | Fix |
@@ -173,6 +300,9 @@ typo alone can move real money.
 | `python: command not found` | Use `python3`, or install from python.org (tick "Add to PATH" on Windows) |
 | `No module named btcbot` | Activate the venv, and run from the repo root |
 | `No module named venv` (Linux) | `sudo apt install python3-venv` |
+| systemd: `status=203/EXEC` | Wrong path in `ExecStart=` — check `.venv/bin/python` exists |
+| systemd: `Read-only file system` writing `data/` | `ReadWritePaths=` doesn't match your install dir |
+| Service runs but `data/` stays empty | Check `journalctl -u btcbot-record` — usually `verify-venue` would have failed too |
 | PowerShell "running scripts is disabled" | `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` |
 | `verify-venue` says 403 / connection failed | Corporate VPN or firewall blocking Kalshi — try another network |
 | `No open markets found` | Check `markets.slug_prefixes` in `config.yaml` matches a live series |
