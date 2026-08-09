@@ -48,14 +48,32 @@ the Up ask is **derived** from the best Down bid, so "Up ask size" literally is
 the resting Down interest. The imbalance measured is genuinely "how much size
 wants Up versus how much wants Down", not an artifact of a quoting convention.
 
-**Opt-in, default unchanged.** `edge_threshold` takes `fair_value: mid |
-microprice` and defaults to `mid`, because every recorded result in this repo was
-produced with the mid and silently changing the estimator would invalidate the
-comparison, not improve it:
+**Opt-in, default unchanged, available everywhere.** `fair_value: mid |
+microprice` lives on the `Strategy` base class, so all three strategies reach it
+— including `always_trade`, which is what `config.yaml` actually runs. It
+defaults to `mid`, because every recorded result in this repo was produced with
+the mid and silently changing the estimator would invalidate the comparison
+rather than improve it.
 
 ```bash
 python -m btcbot backtest --strategy edge_threshold --set fair_value=microprice
 ```
+
+```yaml
+# config.yaml -- reaches `paper` and `live`, not just the backtester
+strategy:
+  name: always_trade
+  params: {direction: follow, assumed_edge: 0.06, fair_value: microprice}
+```
+
+**The side and the price must come from the same estimator.** `always_trade` and
+`volume_threshold` pick a direction with `favored_side()`, which read the mid
+unconditionally. A strategy pricing with the microprice while picking its side
+from the mid would, on a sufficiently skewed book, buy the side it had just
+decided was the underdog — and nothing would crash to tell you. `Strategy` now
+supplies both `market_up()` and `favored_side()` off the same setting, and
+`tests/test_microprice.py` pins a book where the two estimators genuinely name
+different favourites.
 
 Two things it does not do. It does not create edge — it sharpens the estimate of
 what the market thinks, which usually *shrinks* the gap a model-vs-market

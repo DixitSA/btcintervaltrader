@@ -21,7 +21,6 @@ from __future__ import annotations
 from typing import Optional
 
 from ..models import DOWN, UP, Snapshot
-from ..signals import favored_side, market_implied_up
 from .base import Signal, Strategy
 
 
@@ -41,7 +40,9 @@ class AlwaysTradeStrategy(Strategy):
         self.assumed_edge = float(assumed_edge)
 
     def decide(self, snap: Snapshot) -> Optional[Signal]:
-        p_up = market_implied_up(snap)
+        # Both the price and the side come from the strategy's own estimator
+        # (see Strategy.favored_side) so the two cannot disagree.
+        p_up = self.market_up(snap)
         if p_up is None:
             return None
 
@@ -50,7 +51,7 @@ class AlwaysTradeStrategy(Strategy):
         elif self.direction == "down":
             side = DOWN
         else:
-            fav = favored_side(snap)
+            fav = self.favored_side(snap)
             if fav is None:
                 return None
             side = fav if self.direction == "follow" else (DOWN if fav == UP else UP)
@@ -63,6 +64,7 @@ class AlwaysTradeStrategy(Strategy):
             prob=prob,
             reason=(
                 f"always_trade direction={self.direction}, "
-                f"market_p={market_prob:.3f}, assumed_edge={self.assumed_edge:.3f}"
+                f"market_p={market_prob:.3f} [{self.fair_value}], "
+                f"assumed_edge={self.assumed_edge:.3f}"
             ),
         )

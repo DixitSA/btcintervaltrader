@@ -120,25 +120,70 @@ def test_probability_stays_in_range_on_wide_thin_books():
     assert 0.0 <= p <= 1.0
 
 
-def test_edge_threshold_defaults_to_the_mid():
+ALL_STRATEGIES = ("edge_threshold", "always_trade", "volume_threshold")
+
+
+@pytest.mark.parametrize("name", ALL_STRATEGIES)
+def test_every_strategy_defaults_to_the_mid(name):
     """Every recorded result in this repo used the mid; the default must not move."""
-    strat = build_strategy("edge_threshold", {})
-    assert strat.fair_value == "mid"
+    assert build_strategy(name, {}).fair_value == "mid"
 
 
-def test_edge_threshold_accepts_microprice_and_rejects_typos():
-    strat = build_strategy("edge_threshold", {"fair_value": "microprice"})
-    assert strat.fair_value == "microprice"
+@pytest.mark.parametrize("name", ALL_STRATEGIES)
+def test_every_strategy_accepts_microprice_and_rejects_typos(name):
+    """The point of moving this to the base class: all three can reach it."""
+    assert build_strategy(name, {"fair_value": "microprice"}).fair_value == "microprice"
     with pytest.raises(ValueError):
-        build_strategy("edge_threshold", {"fair_value": "midprice"})
+        build_strategy(name, {"fair_value": "midprice"})
 
 
-def test_fair_value_choice_changes_the_measured_edge():
+@pytest.mark.parametrize("name", ALL_STRATEGIES)
+def test_fair_value_choice_changes_the_measured_probability(name):
     """A skewed book is priced differently by the two estimators."""
     snap = snapshot(book(0.55, 900, 0.60, 20), book(0.40, 20, 0.45, 900))
-    mid_strat = build_strategy("edge_threshold", {"fair_value": "mid"})
-    mp_strat = build_strategy("edge_threshold", {"fair_value": "microprice"})
-    assert mp_strat._market_up(snap) > mid_strat._market_up(snap)
+    mid_strat = build_strategy(name, {"fair_value": "mid"})
+    mp_strat = build_strategy(name, {"fair_value": "microprice"})
+    assert mp_strat.market_up(snap) > mid_strat.market_up(snap)
+
+
+@pytest.mark.parametrize("name", ALL_STRATEGIES)
+def test_fair_value_is_recorded_in_params(name):
+    """So `describe()` and the shadow ledger say which estimator produced a result."""
+    strat = build_strategy(name, {"fair_value": "microprice"})
+    assert strat.params["fair_value"] == "microprice"
+    assert "microprice" in strat.describe()
+
+
+def test_side_and_price_come_from_the_same_estimator():
+    """The bug this guards: picking a side from the mid while pricing with the
+    microprice, on a book skewed hard enough that the two disagree."""
+    # Mid puts Up at exactly 0.50; heavy Up-side resting size pushes the
+    # microprice above it. The mid alone would call the window a coin flip.
+    snap = snapshot(book(0.45, 900, 0.55, 10), book(0.45, 10, 0.55, 900))
+    mid_strat = build_strategy("always_trade", {"fair_value": "mid"})
+    mp_strat = build_strategy("always_trade", {"fair_value": "microprice"})
+
+    assert mid_strat.market_up(snap) == pytest.approx(0.50)
+    assert mid_strat.favored_side(snap) is None  # a true coin flip: no favourite
+    assert mp_strat.market_up(snap) > 0.50
+    assert mp_strat.favored_side(snap) == UP
+
+    # And the decision agrees with the estimator that produced it.
+    sig = mp_strat.decide(snap)
+    assert sig is not None and sig.side == UP
+
+
+def test_following_the_favourite_flips_when_the_estimator_does():
+    """A book where mid and microprice name DIFFERENT favourites."""
+    # Mid says Up is the favourite at 0.52; the resting size says otherwise.
+    snap = snapshot(book(0.49, 5, 0.55, 2000), book(0.45, 2000, 0.51, 5))
+    mid_strat = build_strategy("always_trade", {"fair_value": "mid"})
+    mp_strat = build_strategy("always_trade", {"fair_value": "microprice"})
+
+    assert mid_strat.market_up(snap) > 0.50
+    assert mp_strat.market_up(snap) < 0.50
+    assert mid_strat.decide(snap).side == UP
+    assert mp_strat.decide(snap).side == DOWN
 
 
 def test_microprice_does_not_manufacture_a_signal_on_a_balanced_book():

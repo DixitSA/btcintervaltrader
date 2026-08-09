@@ -16,10 +16,8 @@ from __future__ import annotations
 from typing import Optional
 
 from ..models import DOWN, UP, Snapshot
-from ..signals import annualize, fair_probability_up, market_implied_up, microprice_up
+from ..signals import annualize, fair_probability_up
 from .base import Signal, Strategy
-
-FAIR_VALUES = ("mid", "microprice")
 
 
 class EdgeThresholdStrategy(Strategy):
@@ -34,40 +32,23 @@ class EdgeThresholdStrategy(Strategy):
         # warning on _vol() before you do.
         realized_vol_window: Optional[float] = 900.0,
         max_prob: float = 0.95,
-        # How to read the market's own probability out of the two books.
-        # "mid" is the default because it is what every recorded result in this
-        # repo was produced with; switching it changes the measured edge on
-        # every tick, so it is a deliberate choice, not a free upgrade.
-        fair_value: str = "mid",
-        microprice_depth: int = 1,
         **params,
     ):
+        # `fair_value` / `microprice_depth` are handled by the base class, which
+        # is also where `market_up()` lives.
         super().__init__(
             min_edge=min_edge,
             vol_per_year=vol_per_year,
             realized_vol_window=realized_vol_window,
             max_prob=max_prob,
-            fair_value=fair_value,
-            microprice_depth=microprice_depth,
             **params,
         )
-        if fair_value not in FAIR_VALUES:
-            raise ValueError(
-                f"fair_value must be one of {FAIR_VALUES}, got {fair_value!r}"
-            )
         self.min_edge = float(min_edge)
         self.vol_per_year = float(vol_per_year)
         self.realized_vol_window = realized_vol_window
         self.max_prob = float(max_prob)
-        self.fair_value = fair_value
-        self.microprice_depth = int(microprice_depth)
         # Optionally injected by the runner/backtester each tick.
         self.current_realized_vol: Optional[float] = None
-
-    def _market_up(self, snap: Snapshot) -> Optional[float]:
-        if self.fair_value == "microprice":
-            return microprice_up(snap, depth=self.microprice_depth)
-        return market_implied_up(snap)
 
     def _vol(self) -> Optional[float]:
         """Annualized vol to price with, or None if it cannot be measured.
@@ -119,7 +100,7 @@ class EdgeThresholdStrategy(Strategy):
         if model_up is None:
             return None
 
-        market_up = self._market_up(snap)
+        market_up = self.market_up(snap)
         if market_up is None:
             return None
 
