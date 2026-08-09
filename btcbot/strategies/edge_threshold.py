@@ -16,7 +16,7 @@ from __future__ import annotations
 from typing import Optional
 
 from ..models import DOWN, UP, Snapshot
-from ..signals import annualize, fair_probability_up, market_implied_up
+from ..signals import annualize, fair_probability_up
 from .base import Signal, Strategy
 
 
@@ -34,6 +34,8 @@ class EdgeThresholdStrategy(Strategy):
         max_prob: float = 0.95,
         **params,
     ):
+        # `fair_value` / `microprice_depth` are handled by the base class, which
+        # is also where `market_up()` lives.
         super().__init__(
             min_edge=min_edge,
             vol_per_year=vol_per_year,
@@ -98,7 +100,7 @@ class EdgeThresholdStrategy(Strategy):
         if model_up is None:
             return None
 
-        market_up = market_implied_up(snap)
+        market_up = self.market_up(snap)
         if market_up is None:
             return None
 
@@ -119,6 +121,6 @@ class EdgeThresholdStrategy(Strategy):
             prob=prob,
             reason=(
                 f"model_p_up={model_up:.3f} vs market_p_up={market_up:.3f} "
-                f"(edge {edge_up:+.3f}), {remaining:.0f}s left"
+                f"[{self.fair_value}] (edge {edge_up:+.3f}), {remaining:.0f}s left"
             ),
         )

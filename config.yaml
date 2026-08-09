@@ -158,3 +158,18 @@ strategy:
   params:
     direction: follow
     assumed_edge: 0.06
+    # How to read the market's probability off the two books. Available on
+    # EVERY strategy; both the price and the chosen side come from whichever
+    # you pick, so they cannot disagree.
+    #
+    #   mid        -- book midpoint. Assumes the next trade is equally likely
+    #                 to hit either side.
+    #   microprice -- size-weighted mid (Stoikov), leaning toward the thin
+    #                 side. Reduces to the mid exactly when the book is
+    #                 balanced, so it is never worse on a symmetric book.
+    #
+    # Default is `mid` because every recorded result in this repo was produced
+    # with it -- switching changes the measured probability on every tick, so
+    # re-backtest rather than assuming it is a free upgrade. And note the
+    # microprice reads RESTING SIZE, the cheapest thing on a book to fake.
+    fair_value: mid
