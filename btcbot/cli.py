@@ -8,8 +8,15 @@ import sys
 import time
 from pathlib import Path
 
-from .backtest import run_backtest
+from .backtest import group_windows, run_backtest
 from .config import load_config
+from .multiple_testing import (
+    deflated_sharpe_ratio,
+    family_p_value,
+    sample_moments,
+    sharpe_of,
+    sidak_critical_t,
+)
 from .recorder import load_dataset
 from .strategies import REGISTRY, build_strategy
 
@@ -166,6 +173,7 @@ def cmd_sweep(args: argparse.Namespace) -> int:
     print(f"\n{'direction':<10} {'thresh':>10} {'trades':>7} {'win%':>7} {'BE%':>7} {'ROI':>9} {'t':>7} {'z':>7}")
     print("-" * 70)
     best = None
+    sharpes: list[float] = []
     for threshold in args.thresholds:
         for direction in directions:
             strategy = build_strategy(
@@ -182,8 +190,18 @@ def cmd_sweep(args: argparse.Namespace) -> int:
             roi = f"{rep.roi:+.2%}" if rep.roi is not None else "-"
             t = f"{rep.roi_t_stat:+.2f}" if rep.roi_t_stat is not None else "-"
             z = f"{rep.z_score:+.2f}" if rep.z_score is not None else "-"
+            # The Sharpe of every cell, kept because the SPREAD of results
+            # across the grid is what sets the bar the winner has to clear.
+            cell_sharpe = sharpe_of(rep.trade_returns)
+            if cell_sharpe is not None:
+                sharpes.append(cell_sharpe)
             if rep.roi_t_stat is not None and (best is None or rep.roi_t_stat > best[0]):
-                best = (rep.roi_t_stat, f"{direction}@{threshold:,.0f}", rep.n)
+                best = (
+                    rep.roi_t_stat,
+                    f"{direction}@{threshold:,.0f}",
+                    rep.n,
+                    rep.trade_returns,
+                )
             print(
                 f"{direction:<10} {threshold:>10,.0f} {rep.n:>7} {wr:>7} {be:>7} {roi:>9} {t:>7} {z:>7}"
             )
@@ -202,15 +220,54 @@ def cmd_sweep(args: argparse.Namespace) -> int:
         f"every threshold eventually."
     )
     if best is not None:
-        t_best, label, n_best = best
+        t_best, label, n_best, best_returns = best
+        crit = sidak_critical_t(alpha=0.05, n_tests=n_tests)
+        fam_p = family_p_value(t_best, n_tests)
         print(f"\nbest cell by t: {label} (t={t_best:+.2f}, n={n_best})")
+        print(f"  single-test bar   |t| > 2.00   <- wrong bar for a swept result")
+        print(f"  Sidak bar (n={n_tests:<3})  |t| > {crit:.2f}   <- the bar that holds 5% across the grid")
+        print(f"  family-wise p     {fam_p:.3f}        <- P(noise alone beats this SOMEWHERE in the grid)")
+
+        # Deflated Sharpe: the same correction, but using how widely the grid
+        # actually scattered and how skewed the winner's payoffs were, rather
+        # than the test count alone. Binary payoffs are strongly non-normal, so
+        # this is the more trustworthy of the two.
+        moments = sample_moments(best_returns)
+        if moments is not None and len(sharpes) >= 2:
+            _, _, skew, kurt = moments
+            sr = sharpe_of(best_returns)
+            sh_mean = sum(sharpes) / len(sharpes)
+            sh_var = sum((s - sh_mean) ** 2 for s in sharpes) / (len(sharpes) - 1)
+            dsr = deflated_sharpe_ratio(
+                sharpe=sr,
+                n_obs=n_best,
+                n_trials=n_tests,
+                sharpe_variance=sh_var,
+                skew=skew,
+                kurtosis=kurt,
+            )
+            if dsr is not None:
+                print(
+                    f"  deflated Sharpe   {dsr:.3f}        "
+                    f"<- P(true edge > 0) after the search; want > 0.95"
+                )
+                print(
+                    f"     (per-trade Sharpe {sr:+.4f}, skew {skew:+.2f}, "
+                    f"kurtosis {kurt:.2f})"
+                )
+
         if t_best <= 2.0:
-            print("  -> Nothing here clears even the single-test bar. No edge found.")
+            print("\n  -> Nothing here clears even the single-test bar. No edge found.")
+        elif t_best <= crit:
+            print(
+                f"\n  -> Clears |t| > 2 but NOT the {n_tests}-test bar of {crit:.2f}. "
+                "This is what\n     a search finding noise looks like. Do not trade it."
+            )
         else:
             print(
-                "  -> Clears the single-test bar, but it was SELECTED from "
-                f"{n_tests}.\n     Confirm it on data you did not sweep over before "
-                "believing it."
+                f"\n  -> Clears the corrected bar of {crit:.2f}. That is the strongest "
+                "claim this\n     grid can make, and it is still in-sample. Confirm it "
+                "on data you did\n     not sweep over before believing it."
             )
     return 0
 
@@ -233,6 +290,93 @@ def cmd_simulate(args: argparse.Namespace) -> int:
         "is lying to you and needs fixing before any real data goes through it."
     )
     _ = cfg
+    return 0
+
+
+def cmd_hurst(args: argparse.Namespace) -> int:
+    """Is the intra-window BTC path a random walk? Measured, against a control."""
+    from .hurst import DEFAULT_LAGS, hurst_exponent, null_hurst, spot_segments
+
+    cfg = load_config(args.config)
+    data_dir = args.data_dir or cfg.data_dir
+    snapshots = load_dataset(data_dir)
+    if not snapshots:
+        print(f"No recorded snapshots in '{data_dir}'. Run `record` first.", file=sys.stderr)
+        return 1
+
+    windows = group_windows(snapshots)
+    segments = spot_segments(windows)
+    if not segments:
+        print(
+            f"Found {len(windows)} windows but no usable spot series in '{data_dir}'.\n"
+            "Snapshots need a `spot` price to measure the path.",
+            file=sys.stderr,
+        )
+        return 1
+
+    lags = tuple(args.lags) if args.lags else DEFAULT_LAGS
+    result = hurst_exponent(segments, lags=lags)
+    if result is None:
+        longest = max(len(s) for s in segments)
+        print(
+            f"Not enough contiguous data: {len(segments)} windows, longest "
+            f"{longest} returns,\nagainst lags {lags}. Record longer or pass "
+            "smaller --lags.",
+            file=sys.stderr,
+        )
+        return 1
+
+    print(f"\nwindows          : {len(segments)}")
+    print(f"returns/window   : {min(len(s) for s in segments)}-{max(len(s) for s in segments)}")
+    print(f"lags             : {', '.join(str(l) for l in result.lags)}")
+    print(f"chunks per lag   : {', '.join(str(c) for c in result.chunks)}")
+    print(f"\nHurst exponent   : {result.exponent:.3f}")
+
+    null = null_hurst(
+        [len(s) for s in segments], lags=result.lags, trials=args.trials, seed=args.seed
+    )
+    if null is None:
+        print(
+            "\nNo control available, so this number is uninterpretable. R/S is "
+            "biased\nupward on short samples and 0.50 is NOT the right thing to "
+            "compare against."
+        )
+        return 0
+
+    null_mean, null_sd = null
+    print(
+        f"random-walk null : {null_mean:.3f} +/- {null_sd:.3f}  "
+        f"({args.trials} synthetic datasets, same shape)"
+    )
+    if null_sd <= 0:
+        return 0
+
+    z = (result.exponent - null_mean) / null_sd
+    print(f"z vs null        : {z:+.2f}")
+
+    print(
+        "\nThe null is NOT 0.50. R/S run on this many points of pure random walk "
+        f"returns\n{null_mean:.3f} on average -- the estimator is biased upward at "
+        "small samples, and\nreading the raw exponent against 0.50 is how you talk "
+        "yourself into a trend\nthat is not there."
+    )
+    if abs(z) < 2.0:
+        print(
+            f"\n  -> |z| = {abs(z):.2f}. Indistinguishable from a random walk. No rule "
+            "reading only\n     the price path can have a directional edge here; "
+            "anything the sweep finds\n     is selection. This is the expected result."
+        )
+    elif z > 0:
+        print(
+            f"\n  -> z = {z:+.2f}. Trending more than a random walk. Worth explaining "
+            "before\n     trusting: check for a stale or forward-filled spot feed "
+            "first, which\n     produces exactly this signature."
+        )
+    else:
+        print(
+            f"\n  -> z = {z:+.2f}. Mean-reverting more than a random walk. Check for "
+            "bid-ask\n     bounce in the spot feed before calling it structure."
+        )
     return 0
 
 
@@ -847,6 +991,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_sw.add_argument("--assumed-edge", type=float, default=0.03)
     p_sw.set_defaults(func=cmd_sweep)
+
+    p_hu = sub.add_parser(
+        "hurst", help="is the intra-window BTC path a random walk? (vs a control)"
+    )
+    p_hu.add_argument("--data-dir", default=None)
+    p_hu.add_argument(
+        "--lags",
+        type=int,
+        nargs="+",
+        default=None,
+        help="R/S chunk sizes in ticks (default 8 16 32 64)",
+    )
+    p_hu.add_argument(
+        "--trials", type=int, default=200, help="synthetic random walks for the null"
+    )
+    p_hu.add_argument("--seed", type=int, default=42)
+    p_hu.set_defaults(func=cmd_hurst)
 
     p_vv = sub.add_parser(
         "verify-venue", help="check venue connectivity and discovery (places no orders)"

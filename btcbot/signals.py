@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 from typing import Optional
 
-from .models import DOWN, UP, Snapshot
+from .models import DOWN, UP, Book, Snapshot
 
 
 def normal_cdf(x: float) -> float:
@@ -114,6 +114,76 @@ def market_implied_up(snap: Snapshot) -> Optional[float]:
     if down_mid is None:
         return float(up_mid)
     return (up_mid + (1.0 - down_mid)) / 2.0
+
+
+def weighted_mid(book: Book, depth: int = 1) -> Optional[float]:
+    """Size-weighted mid ("microprice"), the first-order Stoikov estimator.
+
+        I = bid_size / (bid_size + ask_size)
+        weighted_mid = I * ask + (1 - I) * bid
+
+    The mid assumes the next trade is equally likely to hit either side. When
+    resting size is lopsided it is not: a book showing 500 contracts bid and 20
+    offered is far more likely to trade up than down, and the mid systematically
+    understates where it will go. The weight leans the estimate toward the THIN
+    side, which is the side about to be consumed.
+
+    Reduces to the mid exactly when the two sides are balanced, so it is never
+    worse than the mid on a symmetric book -- only different on a skewed one.
+
+    `depth` levels are aggregated per side. The estimator is defined at
+    top-of-book (depth=1) and that is the default; deeper aggregation trades
+    responsiveness for stability on thin books.
+
+    Reference: Stoikov, "The Micro-Price" (2018), via the Orderbook section of
+    awesome-systematic-trading -- see docs/systematic-trading.md.
+    """
+    bid, ask = book.best_bid, book.best_ask
+    if bid is None or ask is None:
+        return None
+    if depth < 1:
+        raise ValueError("depth must be >= 1")
+
+    bid_sz = sum(lv.size for lv in book.bids[:depth])
+    ask_sz = sum(lv.size for lv in book.asks[:depth])
+    total = bid_sz + ask_sz
+    if total <= 0:
+        # Sizes missing or zero -- no imbalance information, so the mid is the
+        # honest answer rather than an arbitrary lean.
+        return (bid + ask) / 2.0
+
+    imbalance = bid_sz / total
+    return imbalance * ask + (1.0 - imbalance) * bid
+
+
+def microprice_up(snap: Snapshot, depth: int = 1) -> Optional[float]:
+    """Market's implied P(Up), estimated by microprice instead of mid.
+
+    Same both-books averaging as `market_implied_up`, with each mid replaced by
+    the size-weighted mid.
+
+    On Kalshi this is better founded than it first looks. The book is bid-only:
+    the Up ask is DERIVED from the best Down bid, so "Up ask size" literally IS
+    the resting Down interest. The imbalance being measured is therefore
+    genuinely "how much size wants Up versus how much wants Down", not an
+    artifact of one venue's quoting convention.
+
+    Two things it does not do. It does not create edge -- it sharpens the
+    estimate of what the market thinks, which usually SHRINKS the gap a
+    model-vs-market strategy sees, and shrinking a spurious gap is the point.
+    And it is computed from resting size, the cheapest quantity on a book to
+    fake; on a thin 15-minute binary a single large resting order moves it
+    several points. Prefer it to the mid, do not trust it as a signal on its own.
+    """
+    up_wm = weighted_mid(snap.up_book, depth)
+    down_wm = weighted_mid(snap.down_book, depth)
+    if up_wm is None and down_wm is None:
+        return None
+    if up_wm is None:
+        return 1.0 - float(down_wm)
+    if down_wm is None:
+        return float(up_wm)
+    return (up_wm + (1.0 - down_wm)) / 2.0
 
 
 def book_imbalance(snap: Snapshot, side: str, depth: int = 5) -> Optional[float]:

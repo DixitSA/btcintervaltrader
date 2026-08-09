@@ -212,6 +212,25 @@ python -m btcbot backtest --strategy volume_threshold --set min_volume_usd=50000
 
 Read the **z** column, not the ROI column.
 
+And read the block `sweep` prints *underneath* the table before you believe any
+row of it. The default grid is 20 cells, and the bar for the best of 20 is
+`|t| > 3.02`, not `|t| > 2`. That block prints the corrected bar, the family-wise
+p-value, and a deflated Sharpe ratio that also accounts for how skewed binary
+payoffs are — see [docs/systematic-trading.md](docs/systematic-trading.md).
+
+### Step 2b — Check there is anything to find
+
+```bash
+python -m btcbot hurst
+```
+
+Measures whether the BTC path *inside* a window trends, mean reverts, or is a
+random walk — against a synthetic random-walk control of the same shape, because
+the R/S estimator reads ~0.63 on memoryless data and comparing it to 0.50 would
+call that a trend. If the path is indistinguishable from a random walk, no rule
+reading only price history can have a directional edge, and anything the sweep
+turns up is selection.
+
 ### Step 3 — Paper trade against live books
 
 ```bash
@@ -470,8 +489,15 @@ Be aware of these before running unattended:
 | `btcbot/exits.py` | Stop loss, take profit, trailing stop, drawdown guard |
 | `btcbot/execution.py` | `PaperExecutor` / `BullpenExecutor` / `LiveExecutor` |
 | `btcbot/backtest.py` | Replay + statistics |
+| `btcbot/multiple_testing.py` | Corrections for having tried more than one strategy |
+| `btcbot/hurst.py` | R/S analysis: is the intra-window path a random walk? |
 | `btcbot/simulate.py` | Synthetic no-edge control world |
 | `btcbot/runner.py` | Live loop |
+
+See [docs/systematic-trading.md](docs/systematic-trading.md) for what was taken
+from [awesome-systematic-trading](https://github.com/wangzhe3224/awesome-systematic-trading),
+what was deliberately left, and which of its entries are live leads against the
+known gaps above.
 
 **Separation of concerns that matters:** strategies propose a side and a
 probability; they never choose size. `risk.py` alone decides whether and how much
