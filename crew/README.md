@@ -30,14 +30,37 @@ oracle.
 
 Separate virtualenv, deliberately. See `requirements.txt` for why.
 
+CrewAI needs Python **>=3.10, <3.14**. Check yours first — if the system Python
+is 3.14 or newer, `pip install` will not resolve, and on a release that new
+there is usually no `python3.12` apt package either.
+
+```bash
+python3 --version
+```
+
+**On 3.10–3.13:**
+
 ```bash
 cd /opt/btcintervaltrader
 python3 -m venv crew/.venv
 crew/.venv/bin/pip install -r crew/requirements.txt
 ```
 
-CrewAI needs Python **>=3.10, <3.14** — fine on Ubuntu 22.04 (3.10) and
-24.04 (3.12).
+**On 3.14+**, use `uv` — it fetches a standalone interpreter without touching
+system packages, and it is what CrewAI uses for dependency management anyway:
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh && source $HOME/.local/bin/env
+uv python install 3.12
+cd /opt/btcintervaltrader
+uv venv --python 3.12 crew/.venv
+uv pip install --python crew/.venv/bin/python -r crew/requirements.txt
+sudo chown -R btcbot:btcbot crew/.venv    # btcbot-crew.service runs as btcbot
+```
+
+btcbot itself is fine on 3.14. `btcbot_tools.py` invokes btcbot's *own*
+interpreter rather than the crew's, so the two versions never meet — the
+separation was for dependency isolation and buys version isolation for free.
 
 ## Ollama
 

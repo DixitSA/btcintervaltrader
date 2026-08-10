@@ -265,11 +265,20 @@ day of clean uptime; budget several days for restarts and gaps.
 
 ### Disk
 
-At `poll_seconds: 2.0` the recorder writes roughly **30–60 MB/day** (~750 bytes
-per snapshot, ~43k snapshots/day, more when several windows overlap). Call it
-**1–2 GB/month**. Fine on any VPS, but it grows forever — `data/` is never
-pruned, and a full disk stops the recording silently from your perspective.
-Check occasionally with `df -h`.
+At `poll_seconds: 2.0`, expect roughly **300–500 MB/day** — call it **10–15
+GB/month**. Real Kalshi orderbooks are deep, so a snapshot runs to several KB,
+not the ~750 bytes the synthetic control dataset suggests. Measure your own
+rather than trusting that range:
+
+```bash
+S1=$(du -sb data | cut -f1); sleep 600; S2=$(du -sb data | cut -f1)
+echo "$(( (S2-S1)*144/1000000 )) MB/day"
+```
+
+`data/` is **never pruned** and a full disk stops recording silently from your
+perspective — the service stays green while collecting nothing. On a small VPS
+this is the constraint that bites first. Check `df -h` periodically, and
+consider archiving older `snapshots-*.jsonl` once they have been backtested.
 
 ### Reaching the web panel
 
@@ -312,9 +321,12 @@ by the `btcbot` user.
 | `python: command not found` | Use `python3`, or install from python.org (tick "Add to PATH" on Windows) |
 | `No module named btcbot` | Activate the venv, and run from the repo root |
 | `No module named venv` (Linux) | `sudo apt install python3-venv` |
-| systemd: `status=203/EXEC` | Wrong path in `ExecStart=` — check `.venv/bin/python` exists |
+| systemd: `status=217/USER` | The `btcbot` user doesn't exist. `sudo useradd --system --shell /usr/sbin/nologin --home-dir /opt/btcintervaltrader btcbot` then `sudo chown -R btcbot:btcbot /opt/btcintervaltrader` |
+| systemd: `status=203/EXEC` | Wrong path in `ExecStart=`, or `.venv` was never created — run `scripts/setup.py` **as `btcbot`** |
+| `PermissionError: 'data'` running by hand | You're running as yourself against a `btcbot`-owned tree. Use the service, or `sudo usermod -aG btcbot $USER && sudo chmod -R g+rwX /opt/btcintervaltrader && newgrp btcbot` |
 | systemd: `Read-only file system` writing `data/` | `ReadWritePaths=` doesn't match your install dir |
 | Service runs but `data/` stays empty | Check `journalctl -u btcbot-record` — usually `verify-venue` would have failed too |
+| `Unable to locate package python3.12` (for the crew) | Your release is newer than 3.12. Don't fight apt — use `uv`, see [crew/README.md](crew/README.md) |
 | PowerShell "running scripts is disabled" | `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` |
 | `verify-venue` says 403 / connection failed | Corporate VPN or firewall blocking Kalshi — try another network |
 | `No open markets found` | Check `markets.slug_prefixes` in `config.yaml` matches a live series |
