@@ -207,6 +207,30 @@ policy is the same objection with more capacity to overfit. The existing
 `learner.py` Beta-Binomial calibrator is deliberately the simplest thing that can
 update on outcomes, and it ships disabled.
 
+**LLM agents in the trading path** — the list's "🔥 AI Powered Systematic
+Trading Systems" section. The objection is sharper than the ML one and worth
+stating separately, because this repo *does* now ship an agent stack.
+
+An LLM call is non-deterministic and non-replayable. `backtest.py` replays
+recorded snapshots through the **same strategy code** the live runner executes,
+and that is the property that makes a backtest here unable to see information
+the live bot would not have had. A strategy that calls a model breaks it: you
+cannot ask what it would have done last Tuesday, because it was not there, and
+asking it now shows it an outcome it can infer. Such a strategy could never
+clear `goal.md` Phase 3 or 4 — there would be no way to distinguish it from the
+76.6%-win-rate-in-a-no-edge-world case in README Part 2. Latency compounds it: a
+7B model on CPU is tens of seconds per response against edges README Part 3
+measures in milliseconds.
+
+So `crew/` is a **research and ops layer, not a signal**. Three CrewAI agents on
+a local Ollama run btcbot's read-only commands, quote the numbers, and write a
+dated digest. The read-only boundary is enforced in `crew/btcbot_tools.py` by
+allowlist and validated argv — not by instructing the model, which is not a
+security boundary — and `tests/test_crew_tools.py` pins it in the main suite.
+A language model cannot tell you whether a rule has edge; `multiple_testing.py`
+can. What it is good at is running the same checks every day and writing down
+why a 76% win rate is not a finding.
+
 **Hummingbot / market making** — the most *interesting* rejection. README Part 3
 names market making as the most durable of the three plausible edges here.
 Hummingbot is a serious codebase for exactly that. It is out of scope because

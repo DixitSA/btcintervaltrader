@@ -12,3 +12,7 @@ venv/
 # supervisor). Local to one machine's run; the data itself is under data/.
 recorder-supervisor.log
 recorder.pid
+
+# Research digests written by crew/research_crew.py. Machine-local output,
+# regenerated daily by the timer.
+reports/

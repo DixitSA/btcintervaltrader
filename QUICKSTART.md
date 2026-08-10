@@ -284,6 +284,18 @@ ssh -L 8787:127.0.0.1:8787 youruser@yourserver
 Then open <http://127.0.0.1:8787> locally. The browser extension and native
 messaging host are desktop-only and have no role on a headless server.
 
+### Optional: the research crew
+
+`crew/` runs three CrewAI agents on a local Ollama that execute btcbot's
+read-only analysis commands and write a daily digest to `reports/`. It reads
+and reports; it never trades, and the boundary is enforced in code rather than
+by prompt. Setup, model sizing and the CPU limits that keep inference from
+starving the recorder are in [crew/README.md](crew/README.md).
+
+The one thing to get right: cap Ollama's CPU before enabling the timer. The
+recorder polls every 2 seconds, and a saturated box means gaps in the dataset
+you are trying to collect.
+
 ### Credentials
 
 `record` and `paper` need **no API key** — Kalshi market data is public. Only
