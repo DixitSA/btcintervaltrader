@@ -21,8 +21,12 @@ Group=btcbot
 WorkingDirectory=/opt/btcintervaltrader
 ExecStart=/opt/btcintervaltrader/crew/.venv/bin/python crew/research_crew.py
 Environment=PYTHONUNBUFFERED=1
-Environment=BTCBOT_CREW_MODEL=ollama/qwen2.5:7b
 Environment=OLLAMA_HOST=http://127.0.0.1:11434
+# Per-agent models. Unset BTCBOT_CREW_MODEL_* to fall back to the defaults in
+# research_crew.py; set BTCBOT_CREW_MODEL to force one model everywhere.
+Environment=BTCBOT_CREW_MODEL_STEWARD=ollama/phi3
+Environment=BTCBOT_CREW_MODEL_ANALYST=ollama/llama3.1
+Environment=BTCBOT_CREW_MODEL_SKEPTIC=ollama/llama3.1
 
 # A crew run on CPU takes minutes. Cap it so a wedged model cannot hold a slot
 # all day; the timer will simply try again tomorrow.

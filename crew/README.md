@@ -62,20 +62,73 @@ btcbot itself is fine on 3.14. `btcbot_tools.py` invokes btcbot's *own*
 interpreter rather than the crew's, so the two versions never meet — the
 separation was for dependency isolation and buys version isolation for free.
 
-## Ollama
+## Ollama and per-agent models
 
 ```bash
 curl -fsSL https://ollama.com/install.sh | sh
-ollama pull qwen2.5:7b
+ollama pull llama3.1        # ~4.7 GB
+ollama pull phi3            # ~2.2 GB
 ollama list
 ```
 
-On 16–32 GB of RAM with no GPU, a 7–8B model at Q4 is the sweet spot: roughly
-5 GB resident, and tens of seconds per agent turn. A full three-agent run takes
-**several minutes**. That is fine for a daily digest and useless for anything
-interactive — which is another reason this is not in the trading path.
+Each agent gets its own model, because their jobs are not equally hard:
 
-Smaller alternatives if it is tight: `llama3.2:3b`, `qwen2.5:3b`.
+| Agent | Default | Why |
+|---|---|---|
+| Data Collection Steward | `ollama/phi3` (3.8B) | Reads three tool outputs and repeats the numbers. Almost no reasoning |
+| Quantitative Analyst | `ollama/llama3.1` (8B) | Runs commands and quotes them; needs to follow a conditional instruction about sample size |
+| Research Skeptic | `ollama/llama3.1` (8B) | Carries the argument and writes the digest. The one job worth spending tokens on |
+
+Override per agent, or force one model everywhere:
+
+```bash
+crew/.venv/bin/python crew/research_crew.py \
+    --model-steward ollama/phi3 \
+    --model-analyst ollama/llama3.1 \
+    --model-skeptic ollama/llama3.1
+
+crew/.venv/bin/python crew/research_crew.py --model ollama/llama3.1
+```
+
+Also settable as `BTCBOT_CREW_MODEL_STEWARD` / `_ANALYST` / `_SKEPTIC`, which is
+how `deploy/btcbot-crew.service` sets them.
+
+### The caveat that matters
+
+**Small models are unreliable at structured tool calling**, and every number in
+the digest arrives through a tool call. If the steward starts reporting window
+counts without calling `count_recorded_windows`, it is confabulating — and that
+failure is silent, and it is the exact failure this crew exists to prevent.
+
+Watch the first few runs with `verbose=True` output and confirm you see the tool
+invocations. If phi3 is skipping them or malforming arguments, promote it:
+
+```bash
+--model-steward ollama/llama3.1
+```
+
+The cost is a few minutes per run. Worth it — a digest that quotes invented
+numbers is worse than no digest.
+
+### What about `qwen2.5-coder`?
+
+It has no role in *this* crew. Nothing here generates code; the agents run
+fixed commands and write prose. It is an excellent model for the Unity/Godot/JS
+work it is usually recommended for, and pulling it costs you 4.5 GB of RAM this
+crew will never use. If you later add an agent that writes code, the
+`--model-*` flags are the place to wire it in.
+
+### Speed on a CPU-only box
+
+On a 6-core i5 with `CPUQuota=400%`, expect roughly 4–8 tokens/second on an 8B
+model and noticeably faster on phi3. A full three-agent run is **several
+minutes to half an hour**. Fine for a daily digest, useless interactively —
+which is another reason this is not in the trading path.
+
+Memory: llama3.1 + phi3 resident together is about 7 GB, comfortable in 24 GB
+alongside the recorder. `OLLAMA_MAX_LOADED_MODELS=3` in the drop-in keeps both
+loaded across agent handoffs; set it lower than the number of distinct models
+and Ollama reloads between every agent, which on CPU is minutes of pure waste.
 
 ## Run it
 
