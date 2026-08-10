@@ -45,6 +45,22 @@ except ImportError:  # pragma: no cover - the crew venv may not be installed
 
 ROOT = Path(__file__).resolve().parent.parent
 
+# Per-agent defaults, sized for a 6-core CPU with no GPU.
+#
+# The steward reads three tool outputs and repeats the numbers -- little
+# reasoning, so the small fast model earns its place. The analyst runs commands
+# and quotes them. The skeptic carries the argument and writes the digest, which
+# is the one job worth spending tokens on.
+#
+# CAVEAT on the small model: 3-4B models are unreliable at structured tool
+# calling, and every number in the digest arrives through a tool call. If the
+# steward starts inventing window counts instead of calling
+# count_recorded_windows, promote it -- that failure is silent and it is the
+# exact failure this crew exists to avoid.
+DEFAULT_STEWARD_MODEL = "ollama/phi3"
+DEFAULT_ANALYST_MODEL = "ollama/llama3.1"
+DEFAULT_SKEPTIC_MODEL = "ollama/llama3.1"
+
 
 # --- tools. Thin wrappers; the boundary lives in btcbot_tools.py ---------
 
@@ -110,7 +126,7 @@ ANALYST_TOOLS = [run_sweep, run_backtest, run_hurst, run_compare_exits,
 SKEPTIC_TOOLS = [read_repo_doc, count_recorded_windows]
 
 
-def build_crew(llm: "LLM") -> Crew:
+def build_crew(steward_llm: "LLM", analyst_llm: "LLM", skeptic_llm: "LLM") -> Crew:
     ops = Agent(
         role="Data Collection Steward",
         goal=(
@@ -126,7 +142,7 @@ def build_crew(llm: "LLM") -> Crew:
             "report numbers exactly as the tools give them and never estimate."
         ),
         tools=OPS_TOOLS,
-        llm=llm,
+        llm=steward_llm,
         allow_delegation=False,
         verbose=True,
     )
@@ -146,7 +162,7 @@ def build_crew(llm: "LLM") -> Crew:
             "usually correct behaviour rather than a bug."
         ),
         tools=ANALYST_TOOLS,
-        llm=llm,
+        llm=analyst_llm,
         allow_delegation=False,
         verbose=True,
     )
@@ -168,7 +184,7 @@ def build_crew(llm: "LLM") -> Crew:
             "successful outcome for this project, not a failure."
         ),
         tools=SKEPTIC_TOOLS,
-        llm=llm,
+        llm=skeptic_llm,
         allow_delegation=False,
         verbose=True,
     )
@@ -230,10 +246,29 @@ def build_crew(llm: "LLM") -> Crew:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    # Per-agent models. The steward's job is reading tool output and repeating
+    # numbers, which a small fast model handles; the skeptic writes the digest
+    # and carries the reasoning, so it gets the capable one. See crew/README.md
+    # for the sizing argument and the tool-calling caveat on small models.
     parser.add_argument(
         "--model",
-        default=os.environ.get("BTCBOT_CREW_MODEL", "ollama/qwen2.5:7b"),
-        help="LiteLLM model id. Must carry the ollama/ prefix.",
+        default=os.environ.get("BTCBOT_CREW_MODEL"),
+        help="Set every agent to one model. Overrides the per-agent flags.",
+    )
+    parser.add_argument(
+        "--model-steward",
+        default=os.environ.get("BTCBOT_CREW_MODEL_STEWARD", DEFAULT_STEWARD_MODEL),
+        help=f"Data Collection Steward (default {DEFAULT_STEWARD_MODEL})",
+    )
+    parser.add_argument(
+        "--model-analyst",
+        default=os.environ.get("BTCBOT_CREW_MODEL_ANALYST", DEFAULT_ANALYST_MODEL),
+        help=f"Quantitative Analyst (default {DEFAULT_ANALYST_MODEL})",
+    )
+    parser.add_argument(
+        "--model-skeptic",
+        default=os.environ.get("BTCBOT_CREW_MODEL_SKEPTIC", DEFAULT_SKEPTIC_MODEL),
+        help=f"Research Skeptic (default {DEFAULT_SKEPTIC_MODEL})",
     )
     parser.add_argument(
         "--base-url", default=os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434")
@@ -247,23 +282,55 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    if not args.model.startswith("ollama/"):
-        print(
-            f"error: --model must start with 'ollama/' (got {args.model!r}).\n"
-            "LiteLLM routes on that prefix; without it it will try to reach a "
-            "hosted provider.",
-            file=sys.stderr,
+    if args.model:
+        steward = analyst = skeptic = args.model
+    else:
+        steward, analyst, skeptic = (
+            args.model_steward, args.model_analyst, args.model_skeptic
         )
-        return 2
+
+    for label, model in (
+        ("steward", steward), ("analyst", analyst), ("skeptic", skeptic)
+    ):
+        if not model.startswith("ollama/"):
+            print(
+                f"error: {label} model must start with 'ollama/' (got {model!r}).\n"
+                "LiteLLM routes on that prefix; without it it will try to reach "
+                "a hosted provider.",
+                file=sys.stderr,
+            )
+            return 2
 
     # CrewAI validates OPENAI_API_KEY at startup even when every agent is
     # local. Without this you get a validation error that has nothing to do
     # with your actual configuration.
     os.environ.setdefault("OPENAI_API_KEY", "NA")
 
-    llm = LLM(model=args.model, base_url=args.base_url, temperature=args.temperature)
+    # One LLM object per DISTINCT model, so agents sharing a model share the
+    # client rather than making Ollama juggle duplicates.
+    cache: dict[str, "LLM"] = {}
 
-    result = build_crew(llm).kickoff()
+    def llm_for(model: str) -> "LLM":
+        if model not in cache:
+            cache[model] = LLM(
+                model=model, base_url=args.base_url, temperature=args.temperature
+            )
+        return cache[model]
+
+    print(
+        f"steward: {steward}\nanalyst: {analyst}\nskeptic: {skeptic}\n"
+        f"ollama : {args.base_url}\n"
+    )
+    if len(cache_keys := {steward, analyst, skeptic}) > 1:
+        print(
+            f"{len(cache_keys)} distinct models. If OLLAMA_MAX_LOADED_MODELS is "
+            "below that, Ollama will unload and reload between agents -- slow on "
+            "CPU. See crew/README.md.\n"
+        )
+
+    result = build_crew(
+        llm_for(steward), llm_for(analyst), llm_for(skeptic)
+    ).kickoff()
 
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
