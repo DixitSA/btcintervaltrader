@@ -1,0 +1,21 @@
+# Runs the research digest once a day.
+#
+#   sudo systemctl enable --now btcbot-crew.timer
+#   systemctl list-timers btcbot-crew
+
+[Unit]
+Description=Daily btcintervaltrader research digest
+Documentation=https://github.com/DixitSA/btcintervaltrader
+
+[Timer]
+# 06:00 UTC. The bot's data files roll at UTC midnight, so this reports on a
+# complete previous day rather than a partial one.
+OnCalendar=*-*-* 06:00:00 UTC
+# Spread the start so a reboot does not fire the digest and the recorder's
+# reconnect storm at the same instant.
+RandomizedDelaySec=15min
+# If the box was off at 06:00, run once it is back rather than skipping a day.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

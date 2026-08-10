@@ -1,0 +1,51 @@
+# Daily research digest. Triggered by btcbot-crew.timer, not enabled directly.
+#
+#   sudo cp deploy/btcbot-crew.service deploy/btcbot-crew.timer /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now btcbot-crew.timer
+#
+# Type=oneshot: this runs, writes reports/digest-<date>.md, and exits. It is
+# NOT a service to keep alive -- if it fails, the next day's timer tries again,
+# and a missed digest costs nothing. A missed recorder poll costs data.
+
+[Unit]
+Description=btcintervaltrader research digest (CrewAI + local Ollama)
+Documentation=https://github.com/DixitSA/btcintervaltrader
+After=network-online.target ollama.service
+Wants=ollama.service
+
+[Service]
+Type=oneshot
+User=btcbot
+Group=btcbot
+WorkingDirectory=/opt/btcintervaltrader
+ExecStart=/opt/btcintervaltrader/crew/.venv/bin/python crew/research_crew.py
+Environment=PYTHONUNBUFFERED=1
+Environment=BTCBOT_CREW_MODEL=ollama/qwen2.5:7b
+Environment=OLLAMA_HOST=http://127.0.0.1:11434
+
+# A crew run on CPU takes minutes. Cap it so a wedged model cannot hold a slot
+# all day; the timer will simply try again tomorrow.
+TimeoutStartSec=45min
+
+# The recorder is the priority on this box. The digest yields to it.
+Nice=15
+CPUWeight=20
+IOSchedulingClass=idle
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=btcbot-crew
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+RestrictSUIDSGID=true
+# Writes reports/ only. data/ is read via btcbot, which needs no write access
+# for any allowlisted command.
+ReadWritePaths=/opt/btcintervaltrader/reports
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,14 @@
+# Dependencies for the research crew ONLY. Install into crew/.venv, never into
+# btcbot's virtualenv.
+#
+# btcbot depends on httpx and PyYAML, and that is deliberate: models.py and the
+# strategy/risk/backtest layers unit-test with no network and no install.
+# crewai pulls litellm, openai, pydantic, chromadb and a large transitive tree.
+# Merging the two would put all of that in the process that places orders.
+#
+#   python3 -m venv crew/.venv
+#   crew/.venv/bin/pip install -r crew/requirements.txt
+#
+# crewai requires Python >=3.10,<3.14.
+
+crewai>=0.175

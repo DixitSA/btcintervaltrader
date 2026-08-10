@@ -494,6 +494,9 @@ Be aware of these before running unattended:
 | `btcbot/simulate.py` | Synthetic no-edge control world |
 | `btcbot/runner.py` | Live loop |
 
+| `crew/` | CrewAI + local Ollama research crew. Reads and reports; never trades |
+| `deploy/` | systemd units for the recorder and the daily digest |
+
 See [docs/systematic-trading.md](docs/systematic-trading.md) for what was taken
 from [awesome-systematic-trading](https://github.com/wangzhe3224/awesome-systematic-trading),
 what was deliberately left, and which of its entries are live leads against the
